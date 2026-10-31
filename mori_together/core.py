@@ -41,6 +41,25 @@ def utc(value):
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def local(value):
+    return instant(value).astimezone(PILOT_TZ).strftime("%a, %b %d · %I:%M %p %Z")
+
+
+def local_range(start, end):
+    a, b = instant(start).astimezone(PILOT_TZ), instant(end).astimezone(PILOT_TZ)
+    if a.date() == b.date():
+        return f"{a.strftime('%a, %b %d · %I:%M %p')} – {b.strftime('%I:%M %p %Z')}"
+    return f"{local(start)} – {local(end)}"
+
+
+INVITE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+
+def invite_code():
+    # Short and easy to retype; single-use, so 31^6 combinations is plenty.
+    return "MORI-" + "".join(secrets.choice(INVITE_ALPHABET) for _ in range(6))
+
+
 @dataclass
 class Reply:
     text: str
@@ -59,6 +78,7 @@ select EVENT_ID — propose an option (not a booking)
 confirm VERSION — approve this exact proposal for yourself only
 status — view shared preferences, proposal, approvals and calendar link
 forget — clear your preferences and all pending approvals
+leave — leave this plan (a confirmed plan stays confirmed for your friend)
 delete — delete the current shared plan (creator only)
 No automatic purchases, background listening or unsolicited reminders. Two distinct transport sessions are not verified human identities; do not use this prototype for sensitive group data."""
 
@@ -131,7 +151,7 @@ class Planner:
             return obj
         verb, _, rest = text.partition(" ")
         verb = verb.lower()
-        if verb in {"help", "status", "edit", "search", "forget", "delete"} and not rest:
+        if verb in {"help", "status", "edit", "search", "forget", "delete", "leave"} and not rest:
             return {"action": verb}
         if verb == "new":
             return {"action": verb, "name": rest or "Friend A"}
@@ -163,6 +183,7 @@ class Planner:
         return Reply("Enter YOUR availability and preferences; these are shared with your planning partner. Times are Pacific unless you add an offset.", "form", {
             "title": "Make room for a little together-time",
             "fields": [
+                {"name": "name", "kind": "text", "label": "Your name (shown to your friend)", "required": False},
                 {"name": "city", "kind": "select", "label": "City", "required": True,
                  "options": [{"value": s, "label": s} for s in ["Berkeley", "San Francisco"]]},
                 {"name": "start", "kind": "text", "label": "Available from (e.g. 2026-11-03 14:00, Pacific time)", "required": True},
@@ -210,21 +231,25 @@ class Planner:
         if action == "help":
             return Reply(HELP)
         if action == "new":
+            self.leave_if_confirmed(actor)
             if self.store.current(actor):
-                raise UserError("You already have a plan. Use status or delete it before creating another.")
-            p = {"id": secrets.token_hex(12), "invite": secrets.token_urlsafe(18),
+                raise UserError("You're already in a plan. Type status to see it, or leave to exit it first.")
+            p = {"id": secrets.token_hex(12), "invite": invite_code(),
                  "creator": actor, "mode": self.provider.mode, "members": {actor: {"name": str(cmd.get("name", "Friend A"))[:40], "preferences": {}}},
                  "version": 0, "state": "draft", "events": [], "selected": None, "approvals": []}
             self.store.save(p)
             self.store.bind(actor, p)
             r = self.preferences_card(p)
-            r.text = f"Created a new {self.provider.mode.upper()} plan. Give only your friend this single-use invite: join {p['invite']} TheirName\n" + r.text
+            r.text = (f"Created a new {self.provider.mode.upper()} plan. Ask your friend to send Mori this message, "
+                      f"followed by their name:\njoin {p['invite']}\n(for example: join {p['invite']} Sam). The code works once.\n\n") + r.text
             return r
         if action == "join":
+            self.leave_if_confirmed(actor)
             if self.store.current(actor):
-                raise UserError("This conversation already has a plan. Use status.")
+                raise UserError("You're already in a plan. Type status to see it, or leave to exit it first.")
+            code = str(cmd.get("code", "")).strip()
             p = next((json.loads(row[0]) for row in self.store.db.execute("SELECT body FROM plans")
-                      if json.loads(row[0]).get("invite") == cmd.get("code")), None)
+                      if json.loads(row[0]).get("invite") in {code, code.upper()}), None)
             if not p or len(p["members"]) >= 2:
                 raise UserError("Invalid or already used invite.")
             p["members"][actor] = {"name": str(cmd.get("name", "Friend B"))[:40], "preferences": {}}
@@ -243,14 +268,19 @@ class Planner:
         if cmd.get("plan_id", p["id"]) != p["id"]:
             raise UserError("That card belongs to a different plan. Type status.")
         if "version" in cmd and action != "preferences" and int(cmd["version"]) != p["version"]:
-            raise UserError("This plan changed. Type status to review the latest version before acting.")
+            # Never act on an old card; show what it would be acting on now instead.
+            r = await self.execute(actor, {"action": "status"})
+            r.text = "This plan changed since that card, so nothing was recorded. Here's the latest:\n" + r.text
+            return r
         if action == "delete":
             if actor != p["creator"]:
-                raise UserError("Only the creator can delete the shared plan. Use forget to clear your preferences.")
+                raise UserError("Only the creator can delete the shared plan. Type leave to exit it yourself.")
             self.store.db.execute("DELETE FROM receipts WHERE plan=?", (p["id"],))
             self.store.db.execute("DELETE FROM current_plan WHERE plan=?", (p["id"],))
             self.store.db.execute("DELETE FROM plans WHERE id=?", (p["id"],))
             return Reply("Shared plan and stored message receipts deleted. No external calendar events were created or removed.")
+        if action == "leave":
+            return self.leave(actor, p)
         if action == "forget":
             p["members"][actor]["preferences"] = {}
             self.reset(p)
@@ -259,6 +289,12 @@ class Planner:
             self.store.save(p)
             return Reply("Your preferences and cached replies for this plan were cleared. The proposal and approvals were reset.")
         if action == "preferences":
+            name = str(cmd.get("name") or "").strip()[:40]
+            if name:
+                p["members"][actor]["name"] = name
+            if not any(key in cmd for key in ("city", "start", "end", "budget", "interest")):
+                self.store.save(p)
+                return Reply(f"Thanks, {name}." if name else "Nothing to save. Fill in the card, or type help.")
             pref = dict(p["members"][actor]["preferences"])
             for key in ("city", "start", "end", "budget", "interest"):
                 if key in cmd:
@@ -291,12 +327,17 @@ class Planner:
             self.reset(p)
             self.note(p, actor, "changed their preferences, so the proposal and approvals were reset" if had_proposal else "saved their preferences")
             self.store.save(p)
-            return Reply("Saved only your preferences. Previous proposals and approvals were reset. Both participants can type status; type search when ready.")
+            text = "Saved your preferences."
+            if had_proposal:
+                text += " The previous proposal and any approvals were reset."
+            if pref.get("budget") == 0:
+                text += " A $0 budget means only free events will show."
+            return Reply(text + " " + self.next_step(p, actor))
         if action == "search":
             c = self.constraints(p)
             events = [e for e in await self.provider.search(c) if self.eligible(e, c)]
             if not events:
-                return Reply("No verified matches in this source for your shared time and listed budget. Unknown prices are excluded; try a wider time or another interest. No fictional results substituted.")
+                return Reply("No matches. " + self.explain(p, c) + "\nEvents without a listed price are left out. Try a wider time window, a higher budget or another interest.")
             self.reset(p)
             p["events"] = events[:3]
             p["state"] = "options"
@@ -304,13 +345,9 @@ class Planner:
             self.store.save(p)
             p["search_requested"] = False
             self.store.save(p)
-            return Reply("Here are a few options for you two. Choose one to review together. Listed prices exclude unverified fees.", "carousel", {
-                "title": "A few ways to spend time together",
-                "subtitle": "DEMO fixtures — not real events" if self.provider.mode == "demo" else "Ticketmaster • prices exclude unverified fees",
-                "items": [{"id": e["id"], "title": e["title"], "subtitle": f"{e['venue']} · {e['start']}",
-                           "secondary_text": f"Listed up to ${e['price_max']} · inventory unverified",
-                           "primary_cta": {"label": "Propose this", "selection": {"action": "select", "event_id": e["id"], "plan_id": p["id"], "version": p["version"]}}}
-                          for e in p["events"]]})
+            r = self.options(p)
+            r.text += "\n" + self.explain(p, c)
+            return r
         if action == "select":
             event = next((e for e in p["events"] if e["id"] == cmd.get("event_id")), None)
             if not event:
@@ -365,15 +402,19 @@ class Planner:
             return Reply(links[action] + "\n\n" + links[other] +
                          "\n\nSave the calendar draft yourself. Tickets aren't booked; check final fees and availability.")
         if action == "status":
-            if not p["selected"]:
-                r = self.preferences_card(p)
-                r.text = self.details(p) + "\n" + r.text
-                return r
-            return self.summary(p)
+            if p["selected"]:
+                return self.summary(p)
+            if p["events"]:
+                return self.options(p)
+            if {"city", "start", "end", "budget", "interest"}.issubset(p["members"][actor]["preferences"]):
+                return Reply(self.details(p) + "\n\n" + self.next_step(p, actor) + " Type edit to change yours.")
+            r = self.preferences_card(p)
+            r.text = self.details(p) + "\n\n" + r.text
+            return r
         raise UserError("Unsupported action. Type help.")
 
     def note(self, p, actor, text):
-        p.setdefault("log", []).append({"actor": actor, "text": text})
+        p.setdefault("log", []).append({"actor": actor, "name": p["members"].get(actor, {}).get("name"), "text": text})
 
     def catch_up(self, p, actor):
         # Agents cannot message the partner first, so their news rides on this person's next reply.
@@ -383,7 +424,7 @@ class Planner:
         me["seen"] = len(log)
         if not news:
             return ""
-        lines = [f"• {p['members'].get(e['actor'], {}).get('name', 'Your partner')} {e['text']}" for e in news]
+        lines = [f"• {p['members'].get(e['actor'], {}).get('name') or e.get('name') or 'Your partner'} {e['text']}" for e in news]
         lines = [line for i, line in enumerate(lines) if i == 0 or line != lines[i - 1]]
         return "Since your last message:\n" + "\n".join(lines) + "\n\n"
 
@@ -451,16 +492,89 @@ class Planner:
             if zh and result.card_kind:
                 result.text = "找到几个符合你们共同时间、地点和预算的活动，选一个一起看看吧。标价不含未核实的手续费。"
             return result
+        if p["selected"]:
+            return self.summary(p)
         return Reply("记下你的偏好了。想看推荐时，直接问我附近有什么好玩的就行。" if zh else
                      "I've saved your preferences. Ask me what's on nearby whenever you'd like recommendations.")
 
     def details(self, p):
-        return "\n".join(f"{m['name']}: {json.dumps(m['preferences'], ensure_ascii=False)}" for m in p["members"].values())
+        lines = []
+        for m in p["members"].values():
+            x = m["preferences"]
+            parts = [x["city"]] if "city" in x else []
+            if "start" in x and "end" in x:
+                parts.append(local_range(x["start"], x["end"]))
+            if "budget" in x:
+                parts.append(f"up to ${x['budget']:g}")
+            if "interest" in x:
+                parts.append(x["interest"])
+            lines.append(f"{m['name']}: " + (" · ".join(parts) if parts else "hasn't shared preferences yet"))
+        return "\n".join(lines)
+
+    def next_step(self, p, actor):
+        required = {"city", "start", "end", "budget", "interest"}
+        if len(p["members"]) < 2:
+            return f"Waiting for your friend to join with: join {p['invite']}" if p.get("invite") else "Waiting for your friend to join."
+        waiting = [m["name"] for a, m in p["members"].items() if not required.issubset(m["preferences"])]
+        if waiting:
+            return f"Waiting for {', '.join(waiting)} to share their preferences."
+        return "You're both set. Type search to see options."
+
+    def explain(self, p, c):
+        prefs = [m["preferences"] for m in p["members"].values()]
+        text = f"Searched {c['city']}, {local_range(c['start'], c['end'])}, up to ${c['budget']:g} per person"
+        if len({x["budget"] for x in prefs}) > 1:
+            text += " (the lower of your two budgets)"
+        text += "."
+        interests = [x["interest"] for x in prefs]
+        if c["interest"]:
+            text += f" Interest: {c['interest']}."
+        elif len({i.lower() for i in interests}) > 1 and "any" not in {i.lower() for i in interests}:
+            text += f" Your interests differ ({' / '.join(interests)}), so all activities were included."
+        if c["budget"] == 0:
+            text += " A $0 budget means free events only."
+        return text
+
+    def options(self, p):
+        return Reply("Here are a few options for you two. Choose one to review together. Listed prices exclude unverified fees.", "carousel", {
+            "title": "A few ways to spend time together",
+            "subtitle": "DEMO fixtures — not real events" if self.provider.mode == "demo" else "Ticketmaster • prices exclude unverified fees",
+            "items": [{"id": e["id"], "title": e["title"], "subtitle": f"{e['venue']} · {local(e['start'])}",
+                       "secondary_text": f"Listed up to ${e['price_max']} · inventory unverified",
+                       "primary_cta": {"label": "Propose this", "selection": {"action": "select", "event_id": e["id"], "plan_id": p["id"], "version": p["version"]}}}
+                      for e in p["events"]]})
+
+    def leave_if_confirmed(self, actor):
+        # A confirmed plan is finished business; starting or joining another just moves on from it.
+        p = self.store.current(actor)
+        if p and p["state"] == "confirmed":
+            self.store.db.execute("DELETE FROM current_plan WHERE actor=?", (actor,))
+
+    def leave(self, actor, p):
+        self.store.db.execute("DELETE FROM current_plan WHERE actor=?", (actor,))
+        others = [m["name"] for a, m in p["members"].items() if a != actor]
+        if p["state"] == "confirmed":
+            self.note(p, actor, "left this conversation; the confirmed plan still stands")
+            self.store.save(p)
+            return Reply(f"You've left. The plan stays confirmed for {', '.join(others) or 'your friend'}. Type new YourName to start another.")
+        self.note(p, actor, "left the plan")
+        del p["members"][actor]
+        if not p["members"]:
+            self.store.db.execute("DELETE FROM receipts WHERE plan=?", (p["id"],))
+            self.store.db.execute("DELETE FROM plans WHERE id=?", (p["id"],))
+            return Reply("You've left, and the empty plan was deleted.")
+        if p["creator"] == actor:
+            p["creator"] = next(iter(p["members"]))
+        self.reset(p)
+        p["invite"] = invite_code()
+        p["log"][-1]["text"] += f". New invite for someone else: join {p['invite']}"
+        self.store.save(p)
+        return Reply("You've left the plan. Type new YourName to start another.")
 
     def summary(self, p):
         e = p["selected"]
         approved = [p["members"][a]["name"] for a in p["approvals"]]
-        when = instant(e["start"]).astimezone(ZoneInfo("America/Los_Angeles")).strftime("%a, %b %d · %I:%M %p %Z")
+        when = local(e["start"])
         members = " · ".join(f"{m['name']} {'✓' if a in p['approvals'] else '— waiting'}" for a, m in p["members"].items())
         rows = [{"label": "Activity", "value": e["title"]},
                 {"label": "When", "value": when},

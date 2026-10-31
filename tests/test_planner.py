@@ -96,7 +96,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["approvals"], ["a"])
         self.assertEqual(plan["version"], v)
         self.assertNotIn("reset", result.text)
-        self.assertIn("saved your preferences", result.text)
+        self.assertIn("Waiting for Bob", result.text)
 
     async def test_real_change_tells_speaker_proposal_was_reset(self):
         v = await self.proposed()
@@ -107,6 +107,72 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         result = await self.p.handle("b", "我预算只有10美元")
         self.assertIn("清空", result.text)
         self.assertIsNone(self.store.current("a")["selected"])
+
+    async def confirmed(self):
+        v = await self.proposed()
+        await self.p.handle("a", f"confirm {v}")
+        await self.p.handle("b", f"confirm {v}")
+
+    async def test_joiner_can_start_new_plan_after_confirming(self):
+        await self.confirmed()
+        result = await self.p.handle("b", "new Bob")
+        self.assertIn("Created", result.text)
+        self.assertEqual(self.store.current("a")["state"], "confirmed")
+
+    async def test_leave_confirmed_plan_keeps_it_for_partner(self):
+        await self.confirmed()
+        self.assertIn("stays confirmed", (await self.p.handle("b", "leave")).text)
+        self.assertIsNone(self.store.current("b"))
+        self.assertEqual(self.store.current("a")["state"], "confirmed")
+        self.assertIn("Bob left", (await self.p.handle("a", "status")).text)
+
+    async def test_leave_open_plan_hands_over_and_reissues_invite(self):
+        await self.p.handle("a", "leave")
+        plan = self.store.current("b")
+        self.assertEqual(plan["creator"], "b")
+        self.assertEqual(list(plan["members"]), ["b"])
+        self.assertIn("Alice left the plan", (await self.p.handle("b", "status")).text)
+        result = await self.p.handle("c", f"join {plan['invite'].lower()} Cleo")
+        self.assertEqual(result.card_kind, "form")
+        self.assertEqual(len(self.store.current("b")["members"]), 2)
+
+    async def test_short_invite_and_join_instructions(self):
+        result = await self.p.handle("z", "new Zoe")
+        code = self.store.current("z")["invite"]
+        self.assertRegex(code, r"^MORI-[A-Z2-9]{6}$")
+        self.assertIn(f"join {code} Sam", result.text)
+        self.assertNotIn("TheirName", result.text)
+
+    async def test_status_shows_options_after_partner_searches(self):
+        await self.p.handle("a", "search")
+        result = await self.p.handle("b", "status")
+        self.assertEqual(result.card_kind, "carousel")
+        self.assertIn("Alice found", result.text)
+
+    async def test_stale_confirm_shows_latest_without_approving(self):
+        v = await self.proposed()
+        await self.p.handle("a", "search")
+        await self.p.handle("a", "select demo-1")
+        result = await self.p.handle("b", json.dumps({"action": "confirm", "version": v}))
+        self.assertIn("nothing was recorded", result.text)
+        self.assertEqual(result.card_kind, "review")
+        self.assertEqual(self.store.current("a")["approvals"], [])
+
+    async def test_search_explains_binding_constraints(self):
+        await self.p.handle("b", 'preferences {"budget": 0, "interest": "comedy"}')
+        result = await self.p.handle("a", "search")
+        self.assertIn("lower of your two budgets", result.text)
+        self.assertIn("creative / comedy", result.text)
+        self.assertIn("free events only", result.text)
+        self.assertNotIn("+00:00", json.dumps(result.card_payload))
+
+    async def test_status_is_readable_and_name_comes_from_form(self):
+        card = (await self.p.handle("b", "edit")).card_payload["submit_cta"]["selection"]
+        await self.p.handle("b", json.dumps({**card, "name": "Bobby"}))
+        text = (await self.p.handle("a", "status")).text
+        self.assertIn("Bobby: Berkeley", text)
+        self.assertNotIn("{", text)
+        self.assertNotIn("Z ", text)
 
     async def test_complete_and_repeat_is_not_two_people(self):
         v = await self.proposed()
@@ -226,7 +292,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pref["budget"], 25)
 
     async def test_partner_update_does_not_void_preferences_card(self):
-        card = (await self.p.handle("a", "status")).card_payload["submit_cta"]["selection"]
+        card = (await self.p.handle("a", "edit")).card_payload["submit_cta"]["selection"]
         await self.p.handle("b", 'preferences {"budget":20}')
         result = await self.p.handle("a", json.dumps({**card, "budget": 15}))
         self.assertIn("Saved", result.text)
