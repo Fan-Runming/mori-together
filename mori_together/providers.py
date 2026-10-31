@@ -56,12 +56,17 @@ class Ticketmaster:
     async def search(self, constraints):
         if not self.key:
             raise ProviderError("Live search needs TICKETMASTER_API_KEY in .env. No demo events have been substituted.")
-        raw = await request_json("GET", "https://app.ticketmaster.com/discovery/v2/events.json", params={
-            "apikey": self.key, "city": constraints["city"], "countryCode": "US",
-            "startDateTime": constraints["start"], "endDateTime": constraints["end"],
-            "keyword": constraints.get("interest", ""), "size": 50, "sort": "date,asc"})
-        return [event for item in raw.get("_embedded", {}).get("events", [])
-                if (event := self.normalize(item))]
+        events = {}
+        for city in constraints.get("cities", [constraints["city"]]):
+            raw = await request_json("GET", "https://app.ticketmaster.com/discovery/v2/events.json", params={
+                "apikey": self.key, "city": city, "countryCode": "US",
+                "startDateTime": constraints["start"], "endDateTime": constraints["end"],
+                "keyword": constraints.get("interest", ""), "size": 50, "sort": "date,asc"})
+            for item in raw.get("_embedded", {}).get("events", []):
+                event = self.normalize(item)
+                if event:
+                    events[event["id"]] = event
+        return sorted(events.values(), key=lambda event: event["start"])
 
     async def refresh(self, event):
         if not self.key:
@@ -110,6 +115,9 @@ class ASIInterpreter:
             "and NEVER records approval. Use edit for '重新计划' without new details; it opens preferences "
             "without deleting anything. For ordinary planning language use conversation. "
             "Its preferences is an object with only explicitly stated city,start,end,budget,interest. "
+            "city may be a list when multiple locations work. Normalize SF/san fran/旧金山 to San Francisco "
+            "and 伯克利 to Berkeley. 'berkeley/san fran area' means city ['Berkeley','San Francisco'], "
+            "NOT an unsupported city. Never drop one of two explicitly acceptable cities. "
             "search is a boolean: true for asking about things to do, concerts, events or recommendations. "
             "language is zh for Chinese, en otherwise. question is a short clarification in the speaker's language "
             "only if their request is ambiguous, otherwise omit it. Never return commands or JSON as question. "
