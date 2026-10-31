@@ -1,4 +1,5 @@
 """ASI:One transport. Does not infer human identity from model-generated text."""
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -8,12 +9,37 @@ from pathlib import Path
 from dotenv import load_dotenv
 from uagents import Agent, Context, Protocol
 from uagents_core.contrib.protocols.chat import (
-    ChatAcknowledgement, ChatMessage, TextContent, MetadataContent,
+    ChatAcknowledgement, ChatMessage, TextContent, MetadataContent, ResourceContent,
     EndSessionContent, chat_protocol_spec,
 )
 
 from mori_together.core import Planner, Store, principal
 from mori_together.providers import DemoEvents, Ticketmaster
+
+
+def short_hash(value):
+    return hashlib.sha256(str(value).encode()).hexdigest()[:10]
+
+
+def message_shape(sender, session, msg):
+    """Structure of an incoming message for channel testing. Never includes text, metadata values or URIs."""
+    blocks = []
+    for block in msg.content:
+        item = {"type": getattr(block, "type", type(block).__name__)}
+        if isinstance(block, TextContent):
+            item["chars"] = len(block.text)
+            item["lines"] = block.text.count("\n") + 1
+            item["starts_with_mention"] = block.text.lstrip().startswith("@")
+            item["has_url"] = "http" in block.text
+        elif isinstance(block, MetadataContent):
+            item["keys"] = sorted(block.metadata)
+        elif isinstance(block, ResourceContent):
+            resources = block.resource if isinstance(block.resource, list) else [block.resource]
+            item["resources"] = [{"scheme": r.uri.split(":", 1)[0], "metadata_keys": sorted(r.metadata),
+                                  "mime_type": r.metadata.get("mime_type")} for r in resources]
+        blocks.append(item)
+    return {"sender": short_hash(sender), "session": short_hash(session), "msg": short_hash(msg.msg_id),
+            "timestamp": msg.timestamp.isoformat(), "blocks": blocks}
 
 
 def wire_reply(reply):
@@ -39,6 +65,7 @@ def build_agent():
             raise RuntimeError("Configure these .env values before live startup: " + ", ".join(missing))
     provider = DemoEvents() if mode == "demo" else Ticketmaster()
     planner = Planner(Store(os.getenv("MORI_DB", f"data/{mode}.sqlite3")), provider)
+    debug_shape = os.getenv("MORI_DEBUG_SHAPE") == "1"
     agent = Agent(name="Mori Together" + (" DEMO" if mode == "demo" else ""),
                   seed=seed, port=int(os.getenv("AGENT_PORT", "8001")), mailbox=True,
                   publish_agent_details=True, store_message_history=False,
@@ -49,6 +76,9 @@ def build_agent():
     @protocol.on_message(ChatMessage)
     async def on_message(ctx: Context, sender: str, msg: ChatMessage):
         await ctx.send(sender, ChatAcknowledgement(timestamp=datetime.now(timezone.utc), acknowledged_msg_id=msg.msg_id))
+        if debug_shape:
+            # Opt-in (MORI_DEBUG_SHAPE=1): logs hashes and block structure only, to learn how channels arrive.
+            ctx.logger.info("message shape " + json.dumps(message_shape(sender, ctx.session, msg)))
         text = "\n".join(block.text for block in msg.content if isinstance(block, TextContent))
         if not text.strip():
             return
