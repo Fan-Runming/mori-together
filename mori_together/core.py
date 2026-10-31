@@ -238,6 +238,8 @@ class Planner:
             for key in ("city", "start", "end", "budget", "interest"):
                 if key in cmd:
                     pref[key] = cmd[key]
+            if "city" in pref:
+                pref["city"] = {"berkeley": "Berkeley", "san francisco": "San Francisco"}.get(str(pref["city"]).strip().lower(), pref["city"])
             if "city" in pref and pref["city"] not in {"Berkeley", "San Francisco"}:
                 raise ValueError("This pilot supports Berkeley and San Francisco.")
             if "budget" in pref:
@@ -348,13 +350,37 @@ class Planner:
         if not isinstance(prefs, dict):
             raise ValueError("Please describe your availability, city or budget again.")
         allowed = {"city", "start", "end", "budget", "interest"}
-        updates = {k: v for k, v in prefs.items() if k in allowed and v != p["members"][actor]["preferences"].get(k)}
+        mine = p["members"][actor]["preferences"]
+        # The model restates unchanged facts in other formats; only a real change may reset the proposal.
+        updates = {k: v for k, v in prefs.items() if k in allowed and not self.same_preference(k, v, mine.get(k))}
+        had_proposal = bool(p["selected"])
         if updates:
             await self.execute(actor, {"action": "preferences", **updates})
             p = self.store.current(actor)
         if cmd.get("search") is True:
             p["search_requested"] = True
         self.store.save(p)
+        reply = await self.conversation_reply(p, actor, cmd, zh)
+        if updates and had_proposal:
+            reply.text = ("注意：你的偏好有变化，之前的方案和已有的确认都已清空。\n" if zh else
+                          "Heads up: your preferences changed, so the current proposal and any approvals were reset.\n") + reply.text
+        return reply
+
+    @staticmethod
+    def same_preference(key, new, old):
+        if old is None:
+            return False
+        try:
+            if key in ("start", "end"):
+                # Stored times are whole seconds (see utc()).
+                return instant(new).replace(microsecond=0) == instant(old)
+            if key == "budget":
+                return float(new) == float(old)
+        except (ValueError, TypeError):
+            return False
+        return str(new).strip().lower() == str(old).strip().lower()
+
+    async def conversation_reply(self, p, actor, cmd, zh):
         question = cmd.get("question")
         if isinstance(question, str) and question.strip():
             return Reply(question.strip()[:400])
