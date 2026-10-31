@@ -13,7 +13,7 @@ The original Mori product is separate and is not required for this workflow.
   individual confirmations, calendar draft, forget/delete, idempotent message handling.
 - Implemented adapters: Agent Chat Protocol 0.3.0, ASI:One interactive form/carousel/
   review cards, ASI-1 natural-language intent interpretation, Ticketmaster Discovery.
-- Verified locally: 35 automated tests and an end-to-end OFFLINE demo. SDK imports
+- Verified locally: 38 automated tests and an end-to-end OFFLINE demo. SDK imports
   and outgoing ACP message/card serialization checked against installed uAgents.
 - Live walkthrough completed: Agentverse connection, Ticketmaster results, ASI:One
   cards and approvals from two accounts in one shared conversation.
