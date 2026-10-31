@@ -13,7 +13,7 @@ from uagents_core.contrib.protocols.chat import (
 )
 
 from mori_together.core import Planner, Store, principal
-from mori_together.providers import DemoEvents, Ticketmaster
+from mori_together.providers import DemoEvents, Discovery
 
 
 def wire_reply(reply):
@@ -37,7 +37,7 @@ def build_agent():
         missing = [k for k in ("ASI_ONE_API_KEY", "TICKETMASTER_API_KEY") if not os.getenv(k)]
         if missing:
             raise RuntimeError("Configure these .env values before live startup: " + ", ".join(missing))
-    provider = DemoEvents() if mode == "demo" else Ticketmaster()
+    provider = DemoEvents() if mode == "demo" else Discovery()
     planner = Planner(Store(os.getenv("MORI_DB", f"data/{mode}.sqlite3")), provider)
     agent = Agent(name="Mori Together" + (" DEMO" if mode == "demo" else ""),
                   seed=seed, port=int(os.getenv("AGENT_PORT", "8001")), mailbox=True,

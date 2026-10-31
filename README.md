@@ -181,3 +181,30 @@ Final approval remains a card click. Natural-language assent alone never records
 approval. Interpreter output is tested with simulated responses; these new phrases
 still need a live language-model walkthrough after agent restart. Unmentioned group
 messages and attached chat history are not established capabilities.
+
+
+### Restaurant discovery
+
+The same two-person plan can now search restaurants. Set optional `YELP_API_KEY`
+in your local `.env` and restart the agent to enable live Yelp Places search.
+Without it, activity search still works; restaurant requests explain the missing
+configuration. No live results are replaced with fixtures.
+
+Tell Mori, for example, “想找 Berkeley 的火锅，人均预算 40 美元” and supply your
+availability when asked. The interpreter extracts `kind: restaurant` and cuisine;
+the partner supplies their own preferences. The form also offers Activities /
+Restaurants. Explicitly different categories or cuisines require agreement.
+
+Restaurant cards show source photos when available, address and Yelp price tier.
+A tier is NOT an exact per-person price: budget is a target, not a verified filter.
+Opening hours, dietary suitability and table availability are unverified. The
+suggested meal starts at your shared availability and lasts up to one hour.
+Both participants must approve; changes to business details clear prior approvals.
+After confirmation, ordinary reusable links open a calendar draft, Yelp listing
+(for restaurant information and any booking options), and Google Maps. No booking
+or payment is made. Combined dinner-plus-event itineraries are not implemented.
+Demo mode uses explicitly fictional restaurant fixtures.
+
+API contracts: https://docs.developer.yelp.com/reference/v3_business_search and
+https://docs.developer.yelp.com/reference/v3_business_info . Before public launch,
+verify your Yelp plan's access, display/attribution and data retention requirements.
