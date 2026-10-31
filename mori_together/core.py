@@ -153,8 +153,20 @@ class Planner:
         # Do not send other participants' data, invitations or internal identities to the LLM.
         context = {"now": self.now().isoformat(), "timezone": "America/Los_Angeles",
                    "has_plan": bool(plan),
+                   "state": plan["state"] if plan else "no_plan",
+                   "options": [{"number": i + 1, "title": e["title"]} for i, e in enumerate(plan["events"])] if plan else [],
+                   "proposal_title": plan["selected"]["title"] if plan and plan["selected"] else None,
                    "my_preferences": plan["members"][actor]["preferences"] if plan else {}}
-        return await self.interpreter.interpret(text, context)
+        command = await self.interpreter.interpret(text, context)
+        if command.get("action") == "review":
+            # Natural-language assent opens the exact proposal; the card records approval.
+            return {"action": "confirm"}
+        if command.get("action") == "choose":
+            number = command.get("number")
+            if not plan or type(number) is not int or not 1 <= number <= len(plan["events"]):
+                raise UserError("Which option do you mean? Choose an activity from the current cards.")
+            return {"action": "select", "event_id": plan["events"][number - 1]["id"], "version": plan["version"]}
+        return command
 
     def reset(self, p):
         p["version"] += 1
@@ -308,13 +320,7 @@ class Planner:
             self.store.save(p)
             p["search_requested"] = False
             self.store.save(p)
-            return Reply("Here are a few options for you two. Choose one to review together. Listed prices exclude unverified fees.", "carousel", {
-                "title": "A few ways to spend time together",
-                "subtitle": "DEMO fixtures — not real events" if self.provider.mode == "demo" else "Ticketmaster • prices exclude unverified fees",
-                "items": [{"id": e["id"], "title": e["title"], "subtitle": f"{e['venue']} · {e['start']}",
-                           "secondary_text": f"Listed up to ${e['price_max']} · inventory unverified",
-                           "primary_cta": {"label": "Propose this", "selection": {"action": "select", "event_id": e["id"], "plan_id": p["id"], "version": p["version"]}}}
-                          for e in p["events"]]})
+            return self.options_card(p)
         if action == "select":
             event = next((e for e in p["events"] if e["id"] == cmd.get("event_id")), None)
             if not event:
@@ -369,12 +375,23 @@ class Planner:
             return Reply(links[action] + "\n\n" + links[other] +
                          "\n\nSave the calendar draft yourself. Tickets aren't booked; check final fees and availability.")
         if action == "status":
+            if p["state"] == "options" and p["events"]:
+                return self.options_card(p)
             if not p["selected"]:
                 r = self.preferences_card(p)
                 r.text = self.details(p) + "\n" + r.text
                 return r
             return self.summary(p)
         raise UserError("Unsupported action. Type help.")
+
+    def options_card(self, p):
+        return Reply("Here are a few options for you two. Choose one to review together. Listed prices exclude unverified fees.", "carousel", {
+            "title": "A few ways to spend time together",
+            "subtitle": "DEMO fixtures — not real events" if self.provider.mode == "demo" else "Ticketmaster • prices exclude unverified fees",
+            "items": [{"id": e["id"], "title": e["title"], "subtitle": f"{e['venue']} · {e['start']}",
+                       "secondary_text": f"Listed up to ${e['price_max']} · inventory unverified",
+                       "primary_cta": {"label": "Propose this", "selection": {"action": "select", "event_id": e["id"], "plan_id": p["id"], "version": p["version"]}}}
+                      for e in p["events"]]})
 
     def note(self, p, actor, text):
         p.setdefault("log", []).append({"actor": actor, "text": text})
@@ -429,7 +446,7 @@ class Planner:
                 # Stored times are whole seconds (see utc()).
                 return instant(new).replace(microsecond=0) == instant(old)
             if key == "budget":
-                return float(new) == float(old)
+                return float(re.sub(r"[$,\s]|usd", "", str(new), flags=re.I)) == float(old)
         except (ValueError, TypeError):
             return False
         return str(new).strip().lower() == str(old).strip().lower()

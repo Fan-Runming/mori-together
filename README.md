@@ -13,7 +13,7 @@ The original Mori product is separate and is not required for this workflow.
   individual confirmations, calendar draft, forget/delete, idempotent message handling.
 - Implemented adapters: Agent Chat Protocol 0.3.0, ASI:One interactive form/carousel/
   review cards, ASI-1 natural-language intent interpretation, Ticketmaster Discovery.
-- Verified locally: 23 automated tests and an end-to-end OFFLINE demo. SDK imports
+- Verified locally: 35 automated tests and an end-to-end OFFLINE demo. SDK imports
   and outgoing ACP message/card serialization checked against installed uAgents.
 - Live walkthrough completed: Agentverse connection, Ticketmaster results, ASI:One
   cards and approvals from two accounts in one shared conversation.
@@ -166,3 +166,18 @@ Requests time out and retry at most three times. Logs omit chat text and secrets
 - https://innovationlab.fetch.ai/resources/docs/interactive-cards/asi-interactive-cards
 - https://docs.asi1.ai/documentation/build-with-asi-one/chat-completions
 - https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/
+
+## Conversational planning
+
+Mention Mori in ASI:One, then use ordinary language. Examples:
+
+- “我们现在计划到哪一步了？” — review the current plan or existing results.
+- “选第一个” — propose a numbered option from current results.
+- “这个可以” — redisplay the exact proposal for confirmation with a button.
+- “重新计划” — open preference editing without deleting the plan.
+- “我的预算还是 $30” — restating an equivalent preference preserves approvals.
+
+Final approval remains a card click. Natural-language assent alone never records
+approval. Interpreter output is tested with simulated responses; these new phrases
+still need a live language-model walkthrough after agent restart. Unmentioned group
+messages and attached chat history are not established capabilities.
