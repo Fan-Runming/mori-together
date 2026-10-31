@@ -173,3 +173,19 @@ class RestaurantTests(unittest.IsolatedAsyncioTestCase):
             result=await self.places.add_photo(event,item)
         self.assertNotIn('image',result)
         self.assertEqual(result['title'],event['title'])
+
+
+    async def test_old_confirmed_plan_backfills_cover_without_changing_approval(self):
+        c=self.planner.constraints(self.store.current('a'))
+        e=self.places.normalize(self.item,c['start'],c['end'],'place')
+        p=self.store.current('a'); p.update(selected=e,state='confirmed',approvals=['a','b'],version=7)
+        self.store.save(p)
+        fresh={**e,'image':'https://lh3.googleusercontent.com/cover','photo_credits':[{'name':'Author','url':''}]}
+        with patch.object(self.provider,'refresh',new_callable=AsyncMock,return_value=fresh):
+            result=await self.planner.handle('a','confirm')
+        self.assertEqual(result.card_payload['hero_image'],fresh['image'])
+        self.assertNotIn('Not approved yet',result.text)
+        saved=self.store.current('a')
+        self.assertEqual(saved['approvals'],['a','b'])
+        self.assertEqual(saved['version'],7)
+        self.assertEqual(saved['selected']['start'],e['start'])

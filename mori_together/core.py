@@ -416,13 +416,14 @@ class Planner:
             p["selected"], p["approvals"], p["state"] = event, [], "proposed"
             self.note(p, actor, f"proposed {event['title']}; click Works for me if it suits you")
             self.store.save(p)
-            return self.summary(p)
+            return await self.display_summary(p)
         if action == "confirm":
             if not p["selected"]:
                 raise UserError("Nothing has been proposed yet. Type search to see options.")
             if "version" not in cmd:
-                r = self.summary(p)
-                r.text = "Not approved yet: check this proposal, then click Works for me.\n" + r.text
+                r = await self.display_summary(p)
+                if p["state"] != "confirmed":
+                    r.text = "Not approved yet: check this proposal, then click Works for me.\n" + r.text
                 return r
             fresh = await self.provider.refresh(p["selected"])
             keys = ("title", "start", "end", "venue", "city", "price_min", "price_max", "status", "url", "price_level")
@@ -434,7 +435,7 @@ class Planner:
                 p["selected"], p["approvals"] = fresh, []
                 p["version"] += 1
                 self.store.save(p)
-                r = self.summary(p)
+                r = await self.display_summary(p)
                 r.text = "Event details changed. Both participants must review again.\n" + r.text
                 return r
             p["selected"] = fresh
@@ -443,7 +444,7 @@ class Planner:
             p["state"] = "confirmed" if len(p["approvals"]) == 2 else "proposed"
             self.note(p, actor, "approved, so the plan is confirmed!" if p["state"] == "confirmed" else "said the proposal works for them")
             self.store.save(p)
-            return self.summary(p)
+            return await self.display_summary(p)
         if action == "edit":
             return self.preferences_card(p)
         if action in {"calendar", "event_link"}:
@@ -463,7 +464,7 @@ class Planner:
                          "\n\nSave the calendar draft yourself. Tickets aren't booked; check final fees and availability.")
         if action == "status":
             if p["selected"]:
-                return self.summary(p)
+                return await self.display_summary(p)
             if p["state"] == "options" and p["events"]:
                 return self.options_card(p)
             if {"city", "start", "end", "budget", "interest"}.issubset(p["members"][actor]["preferences"]):
@@ -593,7 +594,7 @@ class Planner:
                     result.text = "找到几个符合你们共同时间、地点和预算的活动，选一个一起看看吧。标价不含未核实的手续费。"
             return result
         if p["selected"]:
-            return self.summary(p)
+            return await self.display_summary(p)
         return Reply("记下你的偏好了。想看推荐时，直接问我附近有什么好玩的就行。" if zh else
                      "I've saved your preferences. Ask me what's on nearby whenever you'd like recommendations.")
 
@@ -669,6 +670,21 @@ class Planner:
         if e.get("kind") in {"restaurant", "place"}:
             return e.get("price_level", "Price unknown") + " · exact cost unverified"
         return "Free" if e["price_max"] == 0 else f"Up to ${e['price_max']:.2f} / person"
+
+    async def display_summary(self, p):
+        e = p["selected"]
+        if e and e["id"].startswith("google:") and not e.get("image"):
+            try:
+                fresh = await self.provider.refresh(e)
+                # Backfill visual metadata only; never alter the agreed facts or approvals.
+                if fresh.get("image"):
+                    for key in ("image", "photo_credits", "source"):
+                        if key in fresh:
+                            e[key] = fresh[key]
+                    self.store.save(p)
+            except ProviderError:
+                pass
+        return self.summary(p)
 
     def summary(self, p):
         e = p["selected"]
