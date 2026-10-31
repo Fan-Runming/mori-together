@@ -13,11 +13,31 @@ from zoneinfo import ZoneInfo
 
 from .providers import ASIInterpreter, ProviderError
 
+# Both pilot cities are in this zone; times typed without an offset are read as local.
+PILOT_TZ = ZoneInfo("America/Los_Angeles")
+
+
+class UserError(ValueError):
+    """A message written for the person in the chat, safe to show as-is."""
+
 
 def instant(value):
-    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    text = str(value).strip().replace("Z", "+00:00")
+    # Accept "2026-11-03 2pm" / "2026-11-03 2:30 pm" as well as ISO 8601.
+    m = re.fullmatch(r"(\d{4}-\d{2}-\d{2})[ T](\d{1,2})(?::(\d{2}))?\s*([ap]m)", text, re.I)
+    if m:
+        if not 1 <= int(m[2]) <= 12:
+            raise UserError("For am/pm times, use an hour from 1 to 12, e.g. 2pm.")
+        hour = int(m[2]) % 12 + (12 if m[4].lower() == "pm" else 0)
+        text = f"{m[1]}T{hour:02d}:{m[3] or '00'}"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        raise UserError(f"I couldn't read the time '{value}'. Use a date and time like 2026-11-03 14:00 (Pacific time).") from None
     if dt.tzinfo is None:
-        raise ValueError("Include a timezone, e.g. 2026-11-03T14:00:00-08:00.")
+        if dt.replace(tzinfo=PILOT_TZ, fold=0).utcoffset() != dt.replace(tzinfo=PILOT_TZ, fold=1).utcoffset():
+            raise UserError("This local time falls during a daylight-saving clock change. Include an explicit UTC offset.")
+        dt = dt.replace(tzinfo=PILOT_TZ)
     return dt.astimezone(timezone.utc)
 
 
@@ -87,6 +107,9 @@ class Planner:
                 command = await self.parse(actor, text)
                 result = await self.execute(actor, command)
                 plan = self.store.current(actor)
+                if plan and actor in plan["members"]:
+                    result.text = self.catch_up(plan, actor) + result.text
+                    self.store.save(plan)
                 if message_id and command["action"] not in {"forget", "delete"}:
                     self.store.db.execute("INSERT INTO receipts VALUES(?,?,?,?)", (
                         actor, message_id, plan["id"] if plan else None, json.dumps(asdict(result))))
@@ -94,7 +117,8 @@ class Planner:
                 return result
             except (ValueError, KeyError, TypeError, ProviderError) as error:
                 self.store.db.rollback()
-                return Reply(str(error) if isinstance(error, (ValueError, ProviderError)) else "Invalid input. Type help for the supported format.")
+                # Only hand-written messages reach the user; Python's own parse errors are not readable.
+                return Reply(str(error) if isinstance(error, (UserError, ProviderError)) else "I couldn't understand that. Use the card, or type help for examples.")
             except Exception:
                 self.store.db.rollback()
                 raise
@@ -107,7 +131,7 @@ class Planner:
         if text.startswith("{"):
             obj = json.loads(text)
             if not isinstance(obj, dict):
-                raise ValueError("Expected a command object.")
+                raise UserError("Expected a command object.")
             return obj
         verb, _, rest = text.partition(" ")
         verb = verb.lower()
@@ -123,7 +147,8 @@ class Planner:
         if verb == "select":
             return {"action": verb, "event_id": rest}
         if verb == "confirm":
-            return {"action": verb, "version": int(rest)}
+            # A bare "confirm" shows the proposal again instead of approving an unseen version.
+            return {"action": verb, "version": int(rest)} if rest.isdigit() else {"action": verb}
         plan = self.store.current(actor)
         # Do not send other participants' data, invitations or internal identities to the LLM.
         context = {"now": self.now().isoformat(), "timezone": "America/Los_Angeles",
@@ -139,33 +164,34 @@ class Planner:
         p["state"] = "draft"
 
     def preferences_card(self, p):
-        return Reply("Enter YOUR availability and preferences; these are shared with your planning partner. Times require a timezone offset.", "form", {
+        return Reply("Enter YOUR availability and preferences; these are shared with your planning partner. Times are Pacific unless you add an offset.", "form", {
             "title": "Make room for a little together-time",
             "fields": [
                 {"name": "city", "kind": "select", "label": "City", "required": True,
                  "options": [{"value": s, "label": s} for s in ["Berkeley", "San Francisco"]]},
-                {"name": "start", "kind": "text", "label": "Available from (ISO date/time + timezone)", "required": True},
-                {"name": "end", "kind": "text", "label": "Available until (ISO date/time + timezone)", "required": True},
+                {"name": "start", "kind": "text", "label": "Available from (e.g. 2026-11-03 14:00, Pacific time)", "required": True},
+                {"name": "end", "kind": "text", "label": "Available until (e.g. 2026-11-03 18:00, Pacific time)", "required": True},
                 {"name": "budget", "kind": "number", "label": "Maximum USD per person", "required": True},
                 {"name": "interest", "kind": "text", "label": "An activity or interest", "required": True}],
+            # No version: preferences are per person, so a partner's update must not void this card.
             "submit_cta": {"label": "Save my preferences", "selection": {
-                "action": "preferences", "plan_id": p["id"], "version": p["version"]}}})
+                "action": "preferences", "plan_id": p["id"]}}})
 
     def constraints(self, p):
         if len(p["members"]) != 2:
-            raise ValueError("Invite a second participant first. Share the invite code privately.")
+            raise UserError("Invite a second participant first. Share the invite code privately.")
         people = list(p["members"].values())
         required = {"city", "start", "end", "budget", "interest"}
         for m in people:
             if not required.issubset(m["preferences"]):
-                raise ValueError(f"{m['name']} still needs to enter their city, availability, budget and interest.")
+                raise UserError(f"{m['name']} still needs to enter their city, availability, budget and interest.")
         prefs = [m["preferences"] for m in people]
         if prefs[0]["city"] != prefs[1]["city"]:
-            raise ValueError("You chose different cities. Agree on Berkeley or San Francisco, then update your preferences.")
+            raise UserError("You chose different cities. Agree on Berkeley or San Francisco, then update your preferences.")
         start = max(instant(x["start"]) for x in prefs)
         end = min(instant(x["end"]) for x in prefs)
         if start <= self.now() or start >= end:
-            raise ValueError("No future overlapping time. Update your availability.")
+            raise UserError("No future overlapping time. Update your availability.")
         # Search one common interest if present, otherwise broad search avoids AND-filtering away results.
         interest = prefs[0]["interest"] if prefs[0]["interest"].lower() == prefs[1]["interest"].lower() else ""
         if interest.lower() == "any":
@@ -189,7 +215,7 @@ class Planner:
             return Reply(HELP)
         if action == "new":
             if self.store.current(actor):
-                raise ValueError("You already have a plan. Use status or delete it before creating another.")
+                raise UserError("You already have a plan. Use status or delete it before creating another.")
             p = {"id": secrets.token_hex(12), "invite": secrets.token_urlsafe(18),
                  "creator": actor, "mode": self.provider.mode, "members": {actor: {"name": str(cmd.get("name", "Friend A"))[:40], "preferences": {}}},
                  "version": 0, "state": "draft", "events": [], "selected": None, "approvals": []}
@@ -200,14 +226,16 @@ class Planner:
             return r
         if action == "join":
             if self.store.current(actor):
-                raise ValueError("This conversation already has a plan. Use status.")
+                raise UserError("This conversation already has a plan. Use status.")
             p = next((json.loads(row[0]) for row in self.store.db.execute("SELECT body FROM plans")
                       if json.loads(row[0]).get("invite") == cmd.get("code")), None)
             if not p or len(p["members"]) >= 2:
-                raise ValueError("Invalid or already used invite.")
+                raise UserError("Invalid or already used invite.")
             p["members"][actor] = {"name": str(cmd.get("name", "Friend B"))[:40], "preferences": {}}
             p["invite"] = None
             self.reset(p)
+            p["members"][actor]["seen"] = len(p.get("log", []))
+            self.note(p, actor, "joined the plan")
             self.store.save(p)
             self.store.bind(actor, p)
             return self.preferences_card(p)
@@ -215,14 +243,14 @@ class Planner:
         if not p or actor not in p["members"]:
             return Reply("Start with 'new YourName', or 'join INVITE_CODE YourName'.\n" + HELP)
         if p["mode"] != self.provider.mode:
-            raise ValueError("This plan belongs to another mode. Use a separate database for live and demo runs.")
+            raise UserError("This plan belongs to another mode. Use a separate database for live and demo runs.")
         if cmd.get("plan_id", p["id"]) != p["id"]:
-            raise ValueError("That card belongs to a different plan. Type status.")
-        if "version" in cmd and int(cmd["version"]) != p["version"]:
-            raise ValueError("This plan changed. Type status to review the latest version before acting.")
+            raise UserError("That card belongs to a different plan. Type status.")
+        if "version" in cmd and action != "preferences" and int(cmd["version"]) != p["version"]:
+            raise UserError("This plan changed. Type status to review the latest version before acting.")
         if action == "delete":
             if actor != p["creator"]:
-                raise ValueError("Only the creator can delete the shared plan. Use forget to clear your preferences.")
+                raise UserError("Only the creator can delete the shared plan. Use forget to clear your preferences.")
             self.store.db.execute("DELETE FROM receipts WHERE plan=?", (p["id"],))
             self.store.db.execute("DELETE FROM current_plan WHERE plan=?", (p["id"],))
             self.store.db.execute("DELETE FROM plans WHERE id=?", (p["id"],))
@@ -230,6 +258,7 @@ class Planner:
         if action == "forget":
             p["members"][actor]["preferences"] = {}
             self.reset(p)
+            self.note(p, actor, "cleared their preferences; any proposal and approvals were reset")
             self.store.db.execute("DELETE FROM receipts WHERE plan=?", (p["id"],))
             self.store.save(p)
             return Reply("Your preferences and cached replies for this plan were cleared. The proposal and approvals were reset.")
@@ -239,25 +268,30 @@ class Planner:
                 if key in cmd:
                     pref[key] = cmd[key]
             if "city" in pref and pref["city"] not in {"Berkeley", "San Francisco"}:
-                raise ValueError("This pilot supports Berkeley and San Francisco.")
+                raise UserError("This pilot supports Berkeley and San Francisco.")
             if "budget" in pref:
-                pref["budget"] = float(pref["budget"])
+                try:
+                    pref["budget"] = float(re.sub(r"[$,\s]|usd", "", str(pref["budget"]), flags=re.I))
+                except ValueError:
+                    raise UserError("Enter a budget as a number of US dollars, e.g. 30.") from None
                 if not math.isfinite(pref["budget"]) or not 0 <= pref["budget"] <= 10000:
-                    raise ValueError("Enter a budget between 0 and 10,000 USD.")
+                    raise UserError("Enter a budget between 0 and 10,000 USD.")
             if "interest" in pref:
                 pref["interest"] = str(pref["interest"])[:120].strip()
                 if not pref["interest"]:
-                    raise ValueError("Enter an interest (or 'any').")
+                    raise UserError("Enter an interest (or 'any').")
             for key in ("start", "end"):
                 if key in pref:
                     d = instant(pref[key])
                     if d <= self.now() or d > self.now() + timedelta(days=7):
-                        raise ValueError("Choose a future time within the next seven days.")
+                        raise UserError("Choose a future time within the next seven days.")
                     pref[key] = utc(d)
             if "start" in pref and "end" in pref and instant(pref["start"]) >= instant(pref["end"]):
-                raise ValueError("End must be after start.")
+                raise UserError("End must be after start.")
             p["members"][actor]["preferences"] = pref
+            had_proposal = bool(p["selected"])
             self.reset(p)
+            self.note(p, actor, "changed their preferences, so the proposal and approvals were reset" if had_proposal else "saved their preferences")
             self.store.save(p)
             return Reply("Saved only your preferences. Previous proposals and approvals were reset. Both participants can type status; type search when ready.")
         if action == "search":
@@ -268,6 +302,7 @@ class Planner:
             self.reset(p)
             p["events"] = events[:3]
             p["state"] = "options"
+            self.note(p, actor, f"found {len(p['events'])} option(s); type status to see them")
             self.store.save(p)
             p["search_requested"] = False
             self.store.save(p)
@@ -281,19 +316,22 @@ class Planner:
         if action == "select":
             event = next((e for e in p["events"] if e["id"] == cmd.get("event_id")), None)
             if not event:
-                raise ValueError("Select an event from your current results. Type search.")
+                raise UserError("Select an event from your current results. Type search.")
             event = await self.provider.refresh(event)
             if not self.eligible(event, self.constraints(p)):
-                raise ValueError("This event no longer fits. Search for another; no approval was recorded.")
+                raise UserError("This event no longer fits. Search for another; no approval was recorded.")
             p["version"] += 1
             p["selected"], p["approvals"], p["state"] = event, [], "proposed"
+            self.note(p, actor, f"proposed {event['title']}; click Works for me if it suits you")
             self.store.save(p)
             return self.summary(p)
         if action == "confirm":
-            if "version" not in cmd:
-                raise ValueError("Review status, then confirm VERSION.")
             if not p["selected"]:
-                raise ValueError("Propose an activity first.")
+                raise UserError("Nothing has been proposed yet. Type search to see options.")
+            if "version" not in cmd:
+                r = self.summary(p)
+                r.text = "Not approved yet: check this proposal, then click Works for me.\n" + r.text
+                return r
             fresh = await self.provider.refresh(p["selected"])
             keys = ("title", "start", "end", "venue", "city", "price_min", "price_max", "status", "url")
             if not self.eligible(fresh, self.constraints(p)):
@@ -311,13 +349,14 @@ class Planner:
             if actor not in p["approvals"]:
                 p["approvals"].append(actor)
             p["state"] = "confirmed" if len(p["approvals"]) == 2 else "proposed"
+            self.note(p, actor, "approved, so the plan is confirmed!" if p["state"] == "confirmed" else "said the proposal works for them")
             self.store.save(p)
             return self.summary(p)
         if action == "edit":
             return self.preferences_card(p)
         if action in {"calendar", "event_link"}:
             if not p["selected"] or p["state"] != "confirmed":
-                raise ValueError("Both people need to confirm the plan first.")
+                raise UserError("Both people need to confirm the plan first.")
             # ASI cards can become locked after one selection. Always expose both
             # destinations as ordinary links, independent of the consumed card.
             links = {
@@ -333,7 +372,22 @@ class Planner:
                 r.text = self.details(p) + "\n" + r.text
                 return r
             return self.summary(p)
-        raise ValueError("Unsupported action. Type help.")
+        raise UserError("Unsupported action. Type help.")
+
+    def note(self, p, actor, text):
+        p.setdefault("log", []).append({"actor": actor, "text": text})
+
+    def catch_up(self, p, actor):
+        # Agents cannot message the partner first, so their news rides on this person's next reply.
+        me = p["members"][actor]
+        log = p.get("log", [])
+        news = [e for e in log[me.get("seen", 0):] if e["actor"] != actor]
+        me["seen"] = len(log)
+        if not news:
+            return ""
+        lines = [f"• {p['members'].get(e['actor'], {}).get('name', 'Your partner')} {e['text']}" for e in news]
+        lines = [line for i, line in enumerate(lines) if i == 0 or line != lines[i - 1]]
+        return "Since your last message:\n" + "\n".join(lines) + "\n\n"
 
     async def conversation(self, actor, cmd):
         """Accumulate this speaker's facts and resume an explicitly requested search."""
@@ -343,10 +397,10 @@ class Planner:
             return Reply("可以帮你们找活动。先创建一个双人计划，或用朋友的邀请码加入；加入后直接说时间、地点和预算即可。" if zh else
                          "I can help you find something to do. First create a shared plan or join your friend's invite; then tell me your availability, city and budget in your own words.")
         if p["mode"] != self.provider.mode:
-            raise ValueError("This plan belongs to another mode. Use a separate database for live and demo runs.")
+            raise UserError("This plan belongs to another mode. Use a separate database for live and demo runs.")
         prefs = cmd.get("preferences", {})
         if not isinstance(prefs, dict):
-            raise ValueError("Please describe your availability, city or budget again.")
+            raise UserError("Please describe your availability, city or budget again.")
         allowed = {"city", "start", "end", "budget", "interest"}
         updates = {k: v for k, v in prefs.items() if k in allowed and v != p["members"][actor]["preferences"].get(k)}
         if updates:
