@@ -43,7 +43,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         await self.p.handle("a", f"@mori-together confirm {v}")
         self.assertEqual(self.store.current("a")["approvals"], ["a"])
         result = await self.p.handle("b", "@mori-together " + json.dumps({"action":"confirm", "version":v}))
-        self.assertIn("calendar.google.com", result.text)
+        self.assertEqual(result.card_kind, "detail")
 
     async def test_complete_and_repeat_is_not_two_people(self):
         v = await self.proposed()
@@ -51,8 +51,39 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         await self.p.handle("a", f"confirm {v}")
         self.assertEqual(self.store.current("a")["state"], "proposed")
         result = await self.p.handle("b", f"confirm {v}")
-        self.assertIn("calendar.google.com", result.text)
+        self.assertEqual(result.card_kind, "detail")
         self.assertEqual(self.store.current("a")["state"], "confirmed")
+
+    async def test_confirmation_card_and_followup_actions(self):
+        from agent import wire_reply
+        v = await self.proposed()
+        blocked = await self.p.handle("a", json.dumps({"action": "calendar", "version": v}))
+        self.assertIn("Both people", blocked.text)
+        waiting = await self.p.handle("a", f"confirm {v}")
+        self.assertIn("Waiting for Bob", waiting.text)
+        result = await self.p.handle("b", f"confirm {v}")
+        self.assertNotIn("https://", result.text)
+        self.assertEqual(wire_reply(result).content[1].metadata["card_kind"], "detail")
+        self.assertEqual((await self.p.handle("a", "status")).card_payload, result.card_payload)
+        for cta, expected in zip(result.card_payload["ctas"], ["calendar.google.com", "View event and tickets"]):
+            response = await self.p.handle("a", json.dumps(cta["selection"]))
+            self.assertIn(expected, response.text)
+        await self.p.handle("b", 'preferences {"budget":10}')
+        stale = await self.p.handle("a", json.dumps(result.card_payload["ctas"][0]["selection"]))
+        self.assertIn("changed", stale.text)
+
+    async def test_card_displays_event_local_date(self):
+        await self.proposed()
+        plan = self.store.current("a")
+        plan["selected"]["start"] = "2026-11-02T04:00:00Z"
+        plan["selected"]["end"] = None
+        plan["state"] = "confirmed"
+        plan["approvals"] = ["a", "b"]
+        result = self.p.summary(plan)
+        rows = {row["label"]: row["value"] for row in result.card_payload["summary_rows"]}
+        self.assertEqual(rows["When"], "Sun, Nov 01 · 08:00 PM PST")
+        self.assertIn("placeholder", rows["Calendar duration"])
+        self.assertIn("20261102T040000Z%2F20261102T050000Z", self.p.calendar_url(plan["selected"]))
 
     async def test_preferences_invalidate_approval(self):
         v = await self.proposed()

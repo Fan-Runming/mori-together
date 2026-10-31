@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 from .providers import ASIInterpreter, ProviderError
 
@@ -310,6 +311,12 @@ class Planner:
             return self.summary(p)
         if action == "edit":
             return self.preferences_card(p)
+        if action in {"calendar", "event_link"}:
+            if not p["selected"] or p["state"] != "confirmed":
+                raise ValueError("Both people need to confirm the plan first.")
+            if action == "calendar":
+                return Reply("[Open calendar draft](" + self.calendar_url(p["selected"]) + ")\nReview the details, then save it to your calendar.")
+            return Reply("[View event and tickets](" + p["selected"]["url"] + ")\nCheck final fees and ticket availability before booking.")
         if action == "status":
             if not p["selected"]:
                 r = self.preferences_card(p)
@@ -324,30 +331,40 @@ class Planner:
     def summary(self, p):
         e = p["selected"]
         approved = [p["members"][a]["name"] for a in p["approvals"]]
-        text = (f"{'DEMO — ' if e['demo'] else ''}{p['state'].upper()} · version {p['version']}\n"
-                f"{e['title']}\n{e['venue']} · {e['start']}\n"
-                f"Listed USD {e['price_min']}–{e['price_max']}; final fees unknown.\n"
-                f"{e['availability']}\nEnd: {e.get('end') or 'not provided by source'}\n"
-                f"Source: {e['url']}\nChecked: {e['checked_at']}\n"
-                f"Approvals: {', '.join(approved) or 'none'} ({len(approved)}/2 distinct conversation sessions).\n"
-                "This confirms your intention to meet, NOT tickets or a reservation.\n")
+        when = instant(e["start"]).astimezone(ZoneInfo("America/Los_Angeles")).strftime("%a, %b %d · %I:%M %p %Z")
+        members = " · ".join(f"{m['name']} {'✓' if a in p['approvals'] else '— waiting'}" for a, m in p["members"].items())
+        rows = [{"label": "Activity", "value": e["title"]},
+                {"label": "When", "value": when},
+                {"label": "Where", "value": e["venue"]},
+                {"label": "Per person", "value": f"Up to ${e['price_max']:.2f} listed · fees extra"},
+                {"label": "Who's in", "value": members},
+                {"label": "Tickets", "value": "Not booked · check availability and final price"}]
+        text = "DEMO · " if e["demo"] else ""
         if p["state"] == "confirmed":
-            start = instant(e["start"])
-            end = instant(e["end"]) if e.get("end") else start + timedelta(hours=1)
-            params = {"action": "TEMPLATE", "text": e["title"], "location": e["venue"],
-                      "dates": start.strftime("%Y%m%dT%H%M%SZ") + "/" + end.strftime("%Y%m%dT%H%M%SZ"),
-                      "details": e["url"] + "\nNot booked. Verify fees and inventory." +
-                      ("\nEnd time is a 1-hour placeholder." if not e.get("end") else "")}
-            return Reply(text + "Calendar draft (save it yourself): https://calendar.google.com/calendar/render?" + urlencode(params))
-        return Reply(text + f"Each participant: confirm {p['version']} (or use Confirm).", "review", {
-            "title": "Does this work for you?",
-            "summary_rows": [{"label": "Activity", "value": e["title"]},
-                             {"label": "When", "value": e["start"]},
-                             {"label": "Where", "value": e["venue"]},
-                             {"label": "Price", "value": f"Up to ${e['price_max']} listed, fees unverified"},
-                             {"label": "Booking", "value": "Not booked — this confirms a plan only"}],
+            if not e.get("end"):
+                rows.append({"label": "Calendar duration", "value": "1-hour placeholder; event end time is unknown"})
+            return Reply(text + "You're both in! Your shared plan is ready.", "detail", {
+                "title": "Your plan is confirmed ✓", "summary_rows": rows,
+                "ctas": [
+                    {"label": "Add to calendar", "primary": True, "selection": {"action": "calendar", "plan_id": p["id"], "version": p["version"]}},
+                    {"label": "View event & tickets", "selection": {"action": "event_link", "plan_id": p["id"], "version": p["version"]}}]})
+        waiting = [m["name"] for a, m in p["members"].items() if a not in p["approvals"]]
+        text += (f"{', '.join(approved)} is in. Waiting for {', '.join(waiting)}." if approved else "Found something for you two. Does this work?")
+        return Reply(text, "review", {
+            "title": f"{len(approved)}/2 confirmed · Your shared plan",
+            "summary_rows": rows,
             "approve_cta": {"label": "Works for me", "selection": {"action": "confirm", "plan_id": p["id"], "version": p["version"]}},
             "reject_cta": {"label": "Edit my preferences", "selection": {"action": "edit", "plan_id": p["id"]}}})
+
+    @staticmethod
+    def calendar_url(e):
+        start = instant(e["start"])
+        end = instant(e["end"]) if e.get("end") else start + timedelta(hours=1)
+        params = {"action": "TEMPLATE", "text": e["title"], "location": e["venue"],
+                  "dates": start.strftime("%Y%m%dT%H%M%SZ") + "/" + end.strftime("%Y%m%dT%H%M%SZ"),
+                  "details": e["url"] + "\nNot booked. Verify fees and inventory." +
+                  ("\nEnd time is a 1-hour placeholder." if not e.get("end") else "")}
+        return "https://calendar.google.com/calendar/render?" + urlencode(params)
 
 
 def principal(sender, session):
