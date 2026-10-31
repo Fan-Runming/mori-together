@@ -21,6 +21,21 @@ class UserError(ValueError):
     """A message written for the person in the chat, safe to show as-is."""
 
 
+def cities(value):
+    aliases = {"berkeley": "Berkeley", "伯克利": "Berkeley", "san francisco": "San Francisco",
+               "san fran": "San Francisco", "sf": "San Francisco", "旧金山": "San Francisco"}
+    parts = value if isinstance(value, list) else re.split(r"\s*(?:/|,|、|\bor\b|\band\b|&)\s*", str(value).lower())
+    result = set()
+    for part in parts:
+        city = aliases.get(str(part).strip().lower())
+        if not city:
+            raise UserError("Which locations work for you: Berkeley, San Francisco, or both? This pilot searches those two cities.")
+        result.add(city)
+    if not result:
+        raise UserError("Choose Berkeley, San Francisco, or both.")
+    return sorted(result)
+
+
 def instant(value):
     text = str(value).strip().replace("Z", "+00:00")
     # Accept "2026-11-03 2pm" / "2026-11-03 2:30 pm" as well as ISO 8601.
@@ -201,7 +216,7 @@ class Planner:
             "fields": [
                 {"name": "name", "kind": "text", "label": "Your name (shown to your friend)", "required": False},
                 {"name": "city", "kind": "select", "label": "City", "required": True,
-                 "options": [{"value": s, "label": s} for s in ["Berkeley", "San Francisco"]]},
+                 "options": [{"value": s, "label": s} for s in ["Berkeley", "San Francisco", "Berkeley / San Francisco"]]},
                 {"name": "start", "kind": "text", "label": "Available from (e.g. 2026-11-03 14:00, Pacific time)", "required": True},
                 {"name": "end", "kind": "text", "label": "Available until (e.g. 2026-11-03 18:00, Pacific time)", "required": True},
                 {"name": "budget", "kind": "number", "label": "Maximum USD per person", "required": True},
@@ -219,7 +234,8 @@ class Planner:
             if not required.issubset(m["preferences"]):
                 raise UserError(f"{m['name']} still needs to enter their city, availability, budget and interest.")
         prefs = [m["preferences"] for m in people]
-        if prefs[0]["city"] != prefs[1]["city"]:
+        shared_cities = sorted(set(cities(prefs[0]["city"])) & set(cities(prefs[1]["city"])))
+        if not shared_cities:
             raise UserError("You chose different cities. Agree on Berkeley or San Francisco, then update your preferences.")
         start = max(instant(x["start"]) for x in prefs)
         end = min(instant(x["end"]) for x in prefs)
@@ -229,11 +245,11 @@ class Planner:
         interest = prefs[0]["interest"] if prefs[0]["interest"].lower() == prefs[1]["interest"].lower() else ""
         if interest.lower() == "any":
             interest = ""
-        return dict(city=prefs[0]["city"], start=utc(start), end=utc(end),
+        return dict(city=shared_cities[0], cities=shared_cities, start=utc(start), end=utc(end),
                     budget=min(x["budget"] for x in prefs), interest=interest)
 
     def eligible(self, event, c):
-        return (event["city"].lower() == c["city"].lower()
+        return (event["city"].lower() in {city.lower() for city in c.get("cities", [c["city"]])}
                 and event["status"] == "onsale"
                 and instant(c["start"]) <= instant(event["start"]) < instant(c["end"])
                 and instant(event["start"]) > self.now()
@@ -316,9 +332,7 @@ class Planner:
                 if key in cmd:
                     pref[key] = cmd[key]
             if "city" in pref:
-                pref["city"] = {"berkeley": "Berkeley", "san francisco": "San Francisco"}.get(str(pref["city"]).strip().lower(), pref["city"])
-            if "city" in pref and pref["city"] not in {"Berkeley", "San Francisco"}:
-                raise UserError("This pilot supports Berkeley and San Francisco.")
+                pref["city"] = " / ".join(cities(pref["city"]))
             if "budget" in pref:
                 try:
                     pref["budget"] = float(re.sub(r"[$,\s]|usd", "", str(pref["budget"]), flags=re.I))
@@ -470,10 +484,11 @@ class Planner:
         # The model restates unchanged facts in other formats; only a real change may reset the proposal.
         updates = {k: v for k, v in prefs.items() if k in allowed and not self.same_preference(k, v, mine.get(k))}
         had_proposal = bool(p["selected"])
+        revising_results = bool(p["selected"] or p["events"])
         if updates:
             await self.execute(actor, {"action": "preferences", **updates})
             p = self.store.current(actor)
-        if cmd.get("search") is True:
+        if cmd.get("search") is True or (updates and revising_results):
             p["search_requested"] = True
         self.store.save(p)
         reply = await self.conversation_reply(p, actor, cmd, zh)
@@ -487,6 +502,8 @@ class Planner:
         if old is None:
             return False
         try:
+            if key == "city":
+                return cities(new) == cities(old)
             if key in ("start", "end"):
                 # Stored times are whole seconds (see utc()).
                 return instant(new).replace(microsecond=0) == instant(old)

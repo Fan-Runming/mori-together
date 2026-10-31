@@ -58,6 +58,38 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["members"]["b"]["preferences"]["budget"], 30)
         self.assertNotIn("select demo", result.text)
 
+    async def test_flexible_cities_intersect_partners_locations(self):
+        await self.p.handle("a", 'preferences {"city":"berkeley/san fran"}')
+        c = self.p.constraints(self.store.current("a"))
+        self.assertEqual(c["cities"], ["Berkeley"])
+        await self.p.handle("b", 'preferences {"city":["SF","Berkeley"]}')
+        c = self.p.constraints(self.store.current("a"))
+        self.assertEqual(c["cities"], ["Berkeley", "San Francisco"])
+        event = (await self.provider.search(c))[0]
+        self.assertTrue(self.p.eligible({**event, "city": "San Francisco"}, c))
+        self.assertFalse(self.p.eligible({**event, "city": "Oakland"}, c))
+
+    async def test_cheaper_followup_automatically_searches_again(self):
+        await self.proposed()
+        async def interpret(text, context):
+            return {"action": "conversation", "preferences": {"budget": 10}, "search": False}
+        self.p.interpreter.interpret = interpret
+        result = await self.p.handle("a", "under 10 per person")
+        self.assertEqual(result.card_kind, "carousel")
+        self.assertTrue(all(e["price_max"] <= 10 for e in self.store.current("a")["events"]))
+        self.assertEqual(self.store.current("a")["approvals"], [])
+
+    async def test_ticketmaster_queries_each_shared_city(self):
+        calls = []
+        async def request(method, url, **kwargs):
+            calls.append(kwargs["params"]["city"])
+            return {}
+        c = self.p.constraints(self.store.current("a"))
+        c["cities"] = ["Berkeley", "San Francisco"]
+        with patch("mori_together.providers.request_json", side_effect=request):
+            self.assertEqual(await Ticketmaster(key="test-only").search(c), [])
+        self.assertEqual(calls, ["Berkeley", "San Francisco"])
+
     async def test_natural_choice_and_assent_show_review_without_approval(self):
         await self.p.handle("a", "search")
         async def interpret(text, context):
