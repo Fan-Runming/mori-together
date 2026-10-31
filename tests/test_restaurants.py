@@ -50,6 +50,35 @@ class RestaurantTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('Not booked',result.text)
                 self.assertIn('calendar.google.com',result.text)
 
+    async def test_place_alternatives_preserve_confirmed_photo_and_require_new_approvals(self):
+        with patch('mori_together.providers.request_json', side_effect=self.request):
+            await self.planner.handle('a', 'search')
+            await self.planner.handle('a', 'select google:fixture')
+            v = self.store.current('a')['version']
+            await self.planner.handle('a', f'confirm {v}')
+            await self.planner.handle('b', f'confirm {v}')
+            plan = self.store.current('a')
+            plan['selected']['image'] = 'https://lh3.googleusercontent.com/test-photo'
+            self.store.save(plan)
+            self.store.db.commit()
+            self.item['id'] = 'alternative'
+            self.item['displayName'] = {'text': 'Another restaurant'}
+            self.planner.interpreter.interpret = AsyncMock(return_value={'action': 'conversation', 'search': True})
+            reply = await self.planner.handle('a', '还有其他选择吗')
+            self.assertIn('仍然保持确认', reply.text)
+            plan = self.store.current('a')
+            self.assertEqual(plan['state'], 'confirmed')
+            self.assertEqual(plan['approvals'], ['a', 'b'])
+            self.assertEqual(plan['selected']['id'], 'google:fixture')
+            summary = await self.planner.handle('a', 'confirm')
+            self.assertEqual(summary.card_payload['hero_image'], plan['selected']['image'])
+            self.assertNotIn('还没确认', summary.text)
+            await self.planner.handle('a', 'select google:alternative')
+            plan = self.store.current('a')
+            self.assertEqual(plan['state'], 'proposed')
+            self.assertEqual(plan['approvals'], [])
+            self.assertGreater(plan['version'], v)
+
     async def test_closed_business_clears_approval(self):
         with patch('mori_together.providers.request_json',side_effect=self.request):
             await self.planner.handle('a','search')
@@ -138,13 +167,15 @@ class RestaurantTests(unittest.IsolatedAsyncioTestCase):
                 'kind':'place', 'interest':'parks',
                 'end':(self.now+timedelta(days=2)).isoformat()}))
         with patch('mori_together.providers.request_json',new_callable=AsyncMock) as req:
-            reply=await self.planner.execute('a',{'action':'conversation','language':'zh','search':True})
+            self.planner.interpreter.interpret = AsyncMock(return_value={'action':'conversation','language':'zh','search':True})
+            reply=await self.planner.handle('a','帮我们找找')
             self.assertIn('几点出发',reply.text)
             req.assert_not_called()
 
     async def test_chinese_place_reply_does_not_claim_verified_budget(self):
         with patch('mori_together.providers.request_json',side_effect=self.request):
-            reply=await self.planner.execute('a',{'action':'conversation','language':'zh','search':True})
+            self.planner.interpreter.interpret = AsyncMock(return_value={'action':'conversation','language':'zh','search':True})
+            reply=await self.planner.handle('a','帮我们找找')
             self.assertEqual(reply.card_kind,'carousel')
             self.assertIn('费用和营业时间尚未核实',reply.text)
             self.assertNotIn('符合你们共同时间、地点和预算',reply.text)
