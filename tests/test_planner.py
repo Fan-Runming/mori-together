@@ -58,6 +58,52 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["members"]["b"]["preferences"]["budget"], 30)
         self.assertNotIn("select demo", result.text)
 
+    async def test_natural_choice_and_assent_show_review_without_approval(self):
+        await self.p.handle("a", "search")
+        async def interpret(text, context):
+            self.assertEqual(context["options"][0]["number"], 1)
+            if text == "选第一个":
+                return {"action": "choose", "number": 1}
+            return {"action": "review", "version": 999, "actor": "b"}
+        self.p.interpreter.interpret = interpret
+        chosen = await self.p.handle("a", "选第一个")
+        self.assertEqual(chosen.card_kind, "review")
+        self.assertEqual(self.store.current("a")["selected"]["id"], "demo-0")
+        review = await self.p.handle("a", "这个可以")
+        self.assertEqual(review.card_kind, "review")
+        self.assertIn("Not approved", review.text)
+        self.assertEqual(self.store.current("a")["approvals"], [])
+
+    async def test_natural_status_reuses_options_without_search(self):
+        first = await self.p.handle("a", "search")
+        async def interpret(text, context):
+            return {"action": "status"}
+        async def unexpected_search(*args):
+            raise AssertionError("Reviewing options must not query provider again")
+        self.p.interpreter.interpret = interpret
+        self.provider.search = unexpected_search
+        result = await self.p.handle("b", "我们现在计划到哪一步了")
+        self.assertEqual(result.card_payload, first.card_payload)
+
+    async def test_invalid_natural_choice_does_not_change_plan(self):
+        await self.p.handle("a", "search")
+        before = self.store.current("a")
+        async def interpret(text, context):
+            return {"action": "choose", "number": 99}
+        self.p.interpreter.interpret = interpret
+        result = await self.p.handle("a", "选第99个")
+        self.assertIn("Which option", result.text)
+        self.assertEqual(self.store.current("a"), before)
+
+    async def test_currency_restatement_does_not_clear_approval(self):
+        v = await self.proposed()
+        await self.p.handle("a", f"confirm {v}")
+        async def interpret(text, context):
+            return {"action": "conversation", "preferences": {"budget": "$30 USD"}}
+        self.p.interpreter.interpret = interpret
+        await self.p.handle("b", "我的预算还是30美元")
+        self.assertEqual(self.store.current("a")["approvals"], ["a"])
+
     async def test_natural_followup_resumes_pending_search(self):
         await self.p.handle("b", "forget")
         async def interpret(text, context):
@@ -81,6 +127,32 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         result = await self.p.handle("a", "那个周末呢")
         self.assertEqual(result.text, "你说的是哪个周末？")
         self.assertEqual(self.store.current("a"), before)
+
+    async def test_restated_preferences_keep_proposal(self):
+        v = await self.proposed()
+        await self.p.handle("a", f"confirm {v}")
+        start = datetime.fromisoformat(self.pref["start"]).astimezone(timezone(timedelta(hours=-8)))
+        async def interpret(text, context):
+            # Same instant and amount as stored, written the way the model tends to restate them.
+            return {"action": "conversation", "language": "en", "search": False,
+                    "preferences": {"start": start.isoformat(), "budget": "30", "city": "berkeley"}}
+        self.p.interpreter.interpret = interpret
+        result = await self.p.handle("b", "sounds fun, I'm free then anyway")
+        plan = self.store.current("a")
+        self.assertEqual(plan["approvals"], ["a"])
+        self.assertEqual(plan["version"], v)
+        self.assertNotIn("reset", result.text)
+        self.assertIn("saved your preferences", result.text)
+
+    async def test_real_change_tells_speaker_proposal_was_reset(self):
+        v = await self.proposed()
+        await self.p.handle("a", f"confirm {v}")
+        async def interpret(text, context):
+            return {"action": "conversation", "language": "zh", "search": False, "preferences": {"budget": 10}}
+        self.p.interpreter.interpret = interpret
+        result = await self.p.handle("b", "我预算只有10美元")
+        self.assertIn("清空", result.text)
+        self.assertIsNone(self.store.current("a")["selected"])
 
     async def test_complete_and_repeat_is_not_two_people(self):
         v = await self.proposed()

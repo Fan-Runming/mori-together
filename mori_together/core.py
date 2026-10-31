@@ -153,8 +153,20 @@ class Planner:
         # Do not send other participants' data, invitations or internal identities to the LLM.
         context = {"now": self.now().isoformat(), "timezone": "America/Los_Angeles",
                    "has_plan": bool(plan),
+                   "state": plan["state"] if plan else "no_plan",
+                   "options": [{"number": i + 1, "title": e["title"]} for i, e in enumerate(plan["events"])] if plan else [],
+                   "proposal_title": plan["selected"]["title"] if plan and plan["selected"] else None,
                    "my_preferences": plan["members"][actor]["preferences"] if plan else {}}
-        return await self.interpreter.interpret(text, context)
+        command = await self.interpreter.interpret(text, context)
+        if command.get("action") == "review":
+            # Natural-language assent opens the exact proposal; the card records approval.
+            return {"action": "confirm"}
+        if command.get("action") == "choose":
+            number = command.get("number")
+            if not plan or type(number) is not int or not 1 <= number <= len(plan["events"]):
+                raise UserError("Which option do you mean? Choose an activity from the current cards.")
+            return {"action": "select", "event_id": plan["events"][number - 1]["id"], "version": plan["version"]}
+        return command
 
     def reset(self, p):
         p["version"] += 1
@@ -267,6 +279,8 @@ class Planner:
             for key in ("city", "start", "end", "budget", "interest"):
                 if key in cmd:
                     pref[key] = cmd[key]
+            if "city" in pref:
+                pref["city"] = {"berkeley": "Berkeley", "san francisco": "San Francisco"}.get(str(pref["city"]).strip().lower(), pref["city"])
             if "city" in pref and pref["city"] not in {"Berkeley", "San Francisco"}:
                 raise UserError("This pilot supports Berkeley and San Francisco.")
             if "budget" in pref:
@@ -306,13 +320,7 @@ class Planner:
             self.store.save(p)
             p["search_requested"] = False
             self.store.save(p)
-            return Reply("Here are a few options for you two. Choose one to review together. Listed prices exclude unverified fees.", "carousel", {
-                "title": "A few ways to spend time together",
-                "subtitle": "DEMO fixtures — not real events" if self.provider.mode == "demo" else "Ticketmaster • prices exclude unverified fees",
-                "items": [{"id": e["id"], "title": e["title"], "subtitle": f"{e['venue']} · {e['start']}",
-                           "secondary_text": f"Listed up to ${e['price_max']} · inventory unverified",
-                           "primary_cta": {"label": "Propose this", "selection": {"action": "select", "event_id": e["id"], "plan_id": p["id"], "version": p["version"]}}}
-                          for e in p["events"]]})
+            return self.options_card(p)
         if action == "select":
             event = next((e for e in p["events"] if e["id"] == cmd.get("event_id")), None)
             if not event:
@@ -367,12 +375,23 @@ class Planner:
             return Reply(links[action] + "\n\n" + links[other] +
                          "\n\nSave the calendar draft yourself. Tickets aren't booked; check final fees and availability.")
         if action == "status":
+            if p["state"] == "options" and p["events"]:
+                return self.options_card(p)
             if not p["selected"]:
                 r = self.preferences_card(p)
                 r.text = self.details(p) + "\n" + r.text
                 return r
             return self.summary(p)
         raise UserError("Unsupported action. Type help.")
+
+    def options_card(self, p):
+        return Reply("Here are a few options for you two. Choose one to review together. Listed prices exclude unverified fees.", "carousel", {
+            "title": "A few ways to spend time together",
+            "subtitle": "DEMO fixtures — not real events" if self.provider.mode == "demo" else "Ticketmaster • prices exclude unverified fees",
+            "items": [{"id": e["id"], "title": e["title"], "subtitle": f"{e['venue']} · {e['start']}",
+                       "secondary_text": f"Listed up to ${e['price_max']} · inventory unverified",
+                       "primary_cta": {"label": "Propose this", "selection": {"action": "select", "event_id": e["id"], "plan_id": p["id"], "version": p["version"]}}}
+                      for e in p["events"]]})
 
     def note(self, p, actor, text):
         p.setdefault("log", []).append({"actor": actor, "text": text})
@@ -402,13 +421,37 @@ class Planner:
         if not isinstance(prefs, dict):
             raise UserError("Please describe your availability, city or budget again.")
         allowed = {"city", "start", "end", "budget", "interest"}
-        updates = {k: v for k, v in prefs.items() if k in allowed and v != p["members"][actor]["preferences"].get(k)}
+        mine = p["members"][actor]["preferences"]
+        # The model restates unchanged facts in other formats; only a real change may reset the proposal.
+        updates = {k: v for k, v in prefs.items() if k in allowed and not self.same_preference(k, v, mine.get(k))}
+        had_proposal = bool(p["selected"])
         if updates:
             await self.execute(actor, {"action": "preferences", **updates})
             p = self.store.current(actor)
         if cmd.get("search") is True:
             p["search_requested"] = True
         self.store.save(p)
+        reply = await self.conversation_reply(p, actor, cmd, zh)
+        if updates and had_proposal:
+            reply.text = ("注意：你的偏好有变化，之前的方案和已有的确认都已清空。\n" if zh else
+                          "Heads up: your preferences changed, so the current proposal and any approvals were reset.\n") + reply.text
+        return reply
+
+    @staticmethod
+    def same_preference(key, new, old):
+        if old is None:
+            return False
+        try:
+            if key in ("start", "end"):
+                # Stored times are whole seconds (see utc()).
+                return instant(new).replace(microsecond=0) == instant(old)
+            if key == "budget":
+                return float(re.sub(r"[$,\s]|usd", "", str(new), flags=re.I)) == float(old)
+        except (ValueError, TypeError):
+            return False
+        return str(new).strip().lower() == str(old).strip().lower()
+
+    async def conversation_reply(self, p, actor, cmd, zh):
         question = cmd.get("question")
         if isinstance(question, str) and question.strip():
             return Reply(question.strip()[:400])
