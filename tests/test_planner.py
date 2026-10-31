@@ -103,7 +103,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.current("a")["selected"]["id"], "demo-0")
         review = await self.p.handle("a", "这个可以")
         self.assertEqual(review.card_kind, "review")
-        self.assertIn("Not approved", review.text)
+        self.assertIn("还没确认", review.text)
         self.assertEqual(self.store.current("a")["approvals"], [])
 
     async def test_natural_status_reuses_options_without_search(self):
@@ -115,7 +115,9 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.p.interpreter.interpret = interpret
         self.provider.search = unexpected_search
         result = await self.p.handle("b", "我们现在计划到哪一步了")
-        self.assertEqual(result.card_payload, first.card_payload)
+        # Same options; the card is shown in the asker's language.
+        self.assertEqual([i["primary_cta"] for i in result.card_payload["items"]],
+                         [i["primary_cta"] | {"label": "提议这个"} for i in first.card_payload["items"]])
 
     async def test_invalid_natural_choice_does_not_change_plan(self):
         await self.p.handle("a", "search")
@@ -124,7 +126,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             return {"action": "choose", "number": 99}
         self.p.interpreter.interpret = interpret
         result = await self.p.handle("a", "选第99个")
-        self.assertIn("Which option", result.text)
+        self.assertIn("哪一个", result.text)
         self.assertEqual(self.store.current("a"), before)
 
     async def test_currency_restatement_does_not_clear_approval(self):
@@ -252,6 +254,56 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("{", text)
         self.assertNotIn("Z ", text)
 
+    async def test_spaced_out_command_and_unplaced_text_get_short_replies(self):
+        self.assertEqual((await self.p.handle("a", "e di t")).card_kind, "form")
+        async def interpret(text, context):
+            return {"action": "help"}
+        self.p.interpreter.interpret = interpret
+        result = await self.p.handle("a", "asdf qwerty")
+        self.assertIn("didn't catch", result.text)
+        self.assertNotIn("preferences {", result.text)
+        self.assertIn("preferences {", (await self.p.handle("a", "help")).text)
+
+    async def test_join_without_code_and_no_plan_are_explained(self):
+        self.assertIn("invite code", (await self.p.handle("z", "join")).text)
+        result = await self.p.handle("z", "status")
+        self.assertIn("not in a plan yet", result.text)
+        self.assertNotIn("preferences {", result.text)
+
+    async def test_prices_use_two_decimals_and_free(self):
+        result = await self.p.handle("a", "search")
+        secondary = [i["secondary_text"] for i in result.card_payload["items"]]
+        self.assertIn("Listed up to $15.00 · inventory unverified", secondary)
+        self.assertIn("Free · inventory unverified", secondary)
+
+    async def test_replies_follow_the_writers_language(self):
+        async def interpret(text, context):
+            return {"action": "status"}
+        self.p.interpreter.interpret = interpret
+        result = await self.p.handle("b", "我们进行到哪一步了")
+        self.assertIn("每人最多", result.text)
+        self.assertIn("太平洋时间", result.text)
+        await self.p.handle("a", "search")
+        await self.p.handle("a", "select demo-0")
+        review = await self.p.handle("b", "status")
+        self.assertEqual(review.card_payload["approve_cta"]["label"], "我可以")
+        self.assertIn("Alice 提议了", review.text)
+        self.assertEqual((await self.p.handle("a", "status")).card_payload["approve_cta"]["label"], "Works for me")
+
+    async def test_search_after_confirming_keeps_plan_until_new_proposal(self):
+        await self.confirmed()
+        confirmed_id = self.store.current("a")["selected"]["id"]
+        result = await self.p.handle("a", "search")
+        self.assertIn("stays in place", result.text)
+        self.assertNotIn(confirmed_id, [i["id"] for i in result.card_payload["items"]])
+        plan = self.store.current("a")
+        self.assertEqual((plan["state"], plan["approvals"]), ("confirmed", ["a", "b"]))
+        self.assertIn("still stands", (await self.p.handle("b", "status")).text)
+        await self.p.handle("a", json.dumps(result.card_payload["items"][0]["primary_cta"]["selection"]))
+        plan = self.store.current("a")
+        self.assertEqual((plan["state"], plan["approvals"]), ("proposed", []))
+        self.assertIn("instead of the confirmed", (await self.p.handle("b", "status")).text)
+
     async def test_complete_and_repeat_is_not_two_people(self):
         v = await self.proposed()
         await self.p.handle("a", f"confirm {v}")
@@ -312,7 +364,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invite_single_use_and_outsider_isolation(self):
         result = await self.p.handle("c", f"join {self.invite} Eve")
-        self.assertIn("Invalid", result.text)
+        self.assertIn("doesn't match an open plan", result.text)
         self.assertIsNone(self.store.current("c"))
         self.assertNotIn("Alice:", (await self.p.handle("c", "status")).text)
 

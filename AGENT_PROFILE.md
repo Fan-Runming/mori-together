@@ -10,6 +10,11 @@ your preferences, search activities, and separately approve a specific proposal.
 Start with `new YourName` or `help`. Pilot cities: Berkeley and San Francisco.
 Uses Agent Chat Protocol, ASI:One forms/carousels/review cards, and Ticketmaster.
 
+In a group channel, @mention Mori Together in every message meant for it. Mori only
+receives messages that mention it; other channel messages and shared links never reach it.
+Assistants relaying for a user should send Mori's commands (`status`, `search`, `edit`)
+or the user's own words with the mention, not a summary of the chat.
+
 This prototype distinguishes conversation sessions, not verified human identities.
 Never paste sensitive chat histories. Preferences are visible to your partner.
 No ticket purchase or reservation. `forget` clears your preferences; the creator
