@@ -214,7 +214,7 @@ class Planner:
         return Reply("Enter YOUR availability and preferences; these are shared with your planning partner. Times are Pacific unless you add an offset.", "form", {
             "title": "Make room for a little together-time",
             "fields": [
-                {"name": "kind", "kind": "select", "label": "What would you like to explore?", "required": False, "options": [{"value": "event", "label": "Activities"}, {"value": "restaurant", "label": "Restaurants"}]},
+                {"name": "kind", "kind": "select", "label": "What would you like to explore?", "required": False, "options": [{"value": "event", "label": "Activities"}, {"value": "restaurant", "label": "Restaurants"}, {"value": "place", "label": "Places to explore"}]},
                 {"name": "name", "kind": "text", "label": "Your name (shown to your friend)", "required": False},
                 {"name": "city", "kind": "select", "label": "City", "required": True,
                  "options": [{"value": s, "label": s} for s in ["Berkeley", "San Francisco", "Berkeley / San Francisco"]]},
@@ -244,7 +244,7 @@ class Planner:
             raise UserError("No future overlapping time. Update your availability.")
         kinds = {x["kind"] for x in prefs if x.get("kind")}
         if len(kinds) > 1:
-            raise UserError("One of you wants an activity and the other a restaurant. Agree which to plan first.")
+            raise UserError("You chose different outing types. Agree on an event, restaurant or place to explore first.")
         kind = next(iter(kinds), "event")
         # Search one common interest if present, otherwise broad search avoids AND-filtering away results.
         interest = prefs[0]["interest"] if prefs[0]["interest"].lower() == prefs[1]["interest"].lower() else ""
@@ -254,15 +254,18 @@ class Planner:
             if len(food_interests) > 1:
                 raise UserError("You suggested different cuisines. Agree on one cuisine, or say restaurants / any for a broad search.")
             interest = next(iter(food_interests), "restaurants")
+        if kind == "place":
+            terms = list(dict.fromkeys(x["interest"] for x in prefs if x.get("kind") == "place" and x["interest"].lower() != "any"))
+            interest = " ".join(terms) or "parks museums attractions"
         if interest.lower() == "any":
             interest = ""
         return dict(city=shared_cities[0], cities=shared_cities, start=utc(start), end=utc(end),
                     budget=min(x["budget"] for x in prefs), interest=interest, kind=kind)
 
     def eligible(self, event, c):
-        if event.get("kind") == "restaurant":
-            return (c.get("kind") == "restaurant" and event["status"] == "candidate"
-                    and c["budget"] > 0
+        if event.get("kind") in {"restaurant", "place"}:
+            return (c.get("kind") in {"restaurant", "place"} and event["status"] == "candidate"
+                    and (c["budget"] > 0 or c.get("kind") == "place")
                     and event["city"].lower() in {city.lower() for city in c.get("cities", [c["city"]])}
                     and self.now() < instant(event["start"])
                     and instant(c["start"]) <= instant(event["start"]) < instant(event["end"]) <= instant(c["end"]))
@@ -349,8 +352,8 @@ class Planner:
             for key in ("city", "start", "end", "budget", "interest", "kind"):
                 if key in cmd:
                     pref[key] = cmd[key]
-            if pref.get("kind", "event") not in {"event", "restaurant"}:
-                raise UserError("Choose activities or restaurants.")
+            if pref.get("kind", "event") not in {"event", "restaurant", "place"}:
+                raise UserError("Choose events, restaurants or places.")
             if "city" in pref:
                 pref["city"] = " / ".join(cities(pref["city"]))
             if "budget" in pref:
@@ -386,8 +389,8 @@ class Planner:
         if action == "search":
             c = self.constraints(p)
             events = [e for e in await self.provider.search(c) if self.eligible(e, c)]
-            if not events and c.get("kind") == "restaurant":
-                return Reply("No restaurant candidates found in your shared city. Try another cuisine. A $0 budget cannot cover a meal; prices and opening hours require checking.")
+            if not events and c.get("kind") in {"restaurant", "place"}:
+                return Reply("No place candidates found in your shared city. Try another type of place or area. Prices and opening hours require checking; restaurant searches need a positive budget.")
             if not events:
                 return Reply("No matches. " + self.explain(p, c) + "\nEvents without a listed price are left out. Try a wider time window, a higher budget or another interest.")
             self.reset(p)
@@ -447,8 +450,8 @@ class Planner:
             # ASI cards can become locked after one selection. Always expose both
             # destinations as ordinary links, independent of the consumed card.
             e = p["selected"]
-            if e.get("kind") == "restaurant":
-                return Reply("[Open calendar draft](" + self.calendar_url(e) + ")\n\n[View restaurant on Yelp](" + e["url"] + ")\n\n[Open map](" + e["map_url"] + ")\n\nNot reserved. Check the restaurant listing for booking options, hours, dietary needs and menu prices. The calendar time is your proposed meal time.")
+            if e.get("kind") in {"restaurant", "place"}:
+                return Reply("[Open calendar draft](" + self.calendar_url(e) + ")\n\n[View place on Google Maps](" + e["url"] + ")\n\n[Open map](" + e["map_url"] + ")\n\nNot booked. Check the listing for hours, admission or menu prices, accessibility and any booking requirements. The calendar time is a proposed visit, not confirmed availability.")
             links = {
                 "calendar": "[Open calendar draft](" + self.calendar_url(p["selected"]) + ")",
                 "event_link": "[View event and tickets](" + p["selected"]["url"] + ")",
@@ -472,13 +475,13 @@ class Planner:
         return Reply("A little time together? Pick an idea to review with your friend.", "carousel", {
             "title": "Your next little adventure",
             "style": "slide",
-            "subtitle": "DEMO · fictional activities" if self.provider.mode == "demo" else ("Restaurant ideas · Source: Yelp · verify prices & hours" if p["events"][0].get("kind") == "restaurant" else "For your shared time & budget · Ticketmaster"),
+            "subtitle": "DEMO · fictional activities" if self.provider.mode == "demo" else ("Places to explore · Google Maps · verify prices & hours" if p["events"][0].get("kind") in {"restaurant", "place"} else "For your shared time & budget · Ticketmaster"),
             "items": [{"id": e["id"], "title": e["title"],
                        **({"image": e["image"]} if e.get("image") else {}),
                        "subtitle": f"{local(e['start'])}\n{e['venue']} · {e['city']}",
-                       "badges": [{"label": "Price unverified" if e.get("kind") == "restaurant" else "Within shared budget", "variant": "info"},
+                       "badges": [{"label": "Price unverified" if e.get("kind") in {"restaurant", "place"} else "Within shared budget", "variant": "info"},
                                   {"label": self.price_label(e), "variant": "info"}],
-                       "secondary_text": e.get("availability") if e.get("kind") == "restaurant" else "Fits your shared availability. Final fees and ticket availability need checking.",
+                       "secondary_text": e.get("availability") if e.get("kind") in {"restaurant", "place"} else "Fits your shared availability. Final fees and ticket availability need checking.",
                        "primary_cta": {"label": "Let's consider this", "selection": {"action": "select", "event_id": e["id"], "plan_id": p["id"], "version": p["version"]}}}
                       for e in p["events"]]})
 
@@ -603,9 +606,9 @@ class Planner:
             text += f" Interest: {c['interest']}."
         elif len({i.lower() for i in interests}) > 1 and "any" not in {i.lower() for i in interests}:
             text += f" Your interests differ ({' / '.join(interests)}), so all activities were included."
-        if c.get("kind") == "restaurant":
-            text += " This is your target budget, not a verified meal price. Suggested meal time only; check hours and tables. Source: Yelp."
-        if c["budget"] == 0:
+        if c.get("kind") in {"restaurant", "place"}:
+            text += " This is your target budget, not a verified cost. Suggested visit time only; check hours and entry requirements. Google Maps. Search terms do not verify atmosphere or suitability."
+        if c["budget"] == 0 and c.get("kind", "event") == "event":
             text += " A $0 budget means free events only."
         return text
 
@@ -638,7 +641,7 @@ class Planner:
 
     @staticmethod
     def price_label(e):
-        if e.get("kind") == "restaurant":
+        if e.get("kind") in {"restaurant", "place"}:
             return e.get("price_level", "Price unknown") + " · exact cost unverified"
         return "Free" if e["price_max"] == 0 else f"Up to ${e['price_max']:.2f} / person"
 
@@ -648,11 +651,11 @@ class Planner:
         when = local(e["start"])
         members = " · ".join(f"{m['name']} {'✓' if a in p['approvals'] else '— waiting'}" for a, m in p["members"].items())
         rows = [{"label": "Activity", "value": e["title"]},
-                {"label": "Suggested meal time" if e.get("kind") == "restaurant" else "When", "value": when},
+                {"label": "Suggested visit time" if e.get("kind") in {"restaurant", "place"} else "When", "value": when},
                 {"label": "Where", "value": e["venue"]},
                 {"label": "Per person", "value": self.price_label(e)},
                 {"label": "Who's in", "value": members},
-                {"label": "Reservation" if e.get("kind") == "restaurant" else "Tickets", "value": e["availability"] if e.get("kind") == "restaurant" else "Not booked · check availability and final price"}]
+                {"label": "Visit details" if e.get("kind") in {"restaurant", "place"} else "Tickets", "value": e["availability"] if e.get("kind") in {"restaurant", "place"} else "Not booked · check availability and final price"}]
         text = "DEMO · " if e["demo"] else ""
         if p["state"] == "confirmed":
             if not e.get("end"):
@@ -662,7 +665,7 @@ class Planner:
                 **({"hero_image": e["image"]} if e.get("image") else {}),
                 "ctas": [
                     {"label": "Add to calendar", "primary": True, "selection": {"action": "calendar", "plan_id": p["id"], "version": p["version"]}},
-                    {"label": "Restaurant & map" if e.get("kind") == "restaurant" else "View event & tickets", "selection": {"action": "event_link", "plan_id": p["id"], "version": p["version"]}}]})
+                    {"label": "View place & map" if e.get("kind") in {"restaurant", "place"} else "View event & tickets", "selection": {"action": "event_link", "plan_id": p["id"], "version": p["version"]}}]})
         waiting = [m["name"] for a, m in p["members"].items() if a not in p["approvals"]]
         text += (f"{', '.join(approved)} is in. Waiting for {', '.join(waiting)}." if approved else "Found something for you two. Does this work?")
         return Reply(text, "review", {
@@ -677,7 +680,7 @@ class Planner:
         end = instant(e["end"]) if e.get("end") else start + timedelta(hours=1)
         params = {"action": "TEMPLATE", "text": e["title"], "location": e["venue"],
                   "dates": start.strftime("%Y%m%dT%H%M%SZ") + "/" + end.strftime("%Y%m%dT%H%M%SZ"),
-                  "details": e["url"] + ("\nNot reserved. Suggested meal time; verify hours, menu prices and dietary needs." if e.get("kind") == "restaurant" else "\nNot booked. Verify fees and inventory.") +
+                  "details": e["url"] + ("\nNot booked. Suggested visit time; verify opening hours, admission/menu prices and suitability." if e.get("kind") in {"restaurant", "place"} else "\nNot booked. Verify fees and inventory.") +
                   ("\nEnd time is a 1-hour placeholder." if not e.get("end") else "")}
         return "https://calendar.google.com/calendar/render?" + urlencode(params)
 

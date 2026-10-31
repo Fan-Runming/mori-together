@@ -183,28 +183,32 @@ still need a live language-model walkthrough after agent restart. Unmentioned gr
 messages and attached chat history are not established capabilities.
 
 
-### Restaurant discovery
+### Places and restaurant discovery
 
-The same two-person plan can now search restaurants. Set optional `YELP_API_KEY`
-in your local `.env` and restart the agent to enable live Yelp Places search.
-Without it, activity search still works; restaurant requests explain the missing
-configuration. No live results are replaced with fixtures.
+Set optional `GOOGLE_PLACES_API_KEY` in local `.env`, enable Places API (New) in a
+Google Cloud project with billing, restrict the key to that API, and restart the
+agent. Configure request quotas in Cloud Console. Without a key, event search
+still works and place requests explain the missing configuration.
 
-Tell Mori, for example, “想找 Berkeley 的火锅，人均预算 40 美元” and supply your
-availability when asked. The interpreter extracts `kind: restaurant` and cuisine;
-the partner supplies their own preferences. The form also offers Activities /
-Restaurants. Explicitly different categories or cuisines require agreement.
+Examples: “想找 Berkeley 的火锅”, “想去公园散步”, “想找好看的拍照地点”.
+Mori extracts restaurant/place/event intent and search terms, asks for missing
+shared availability, city and budget, then offers up to three candidates.
+Both people must confirm. Confirmation provides reusable Google Maps and calendar
+links. Visit duration is a proposed one-hour block bounded by shared availability.
+Hours, atmosphere, admission costs, dietary suitability and reservations are NOT
+verified. Unknown cost is not free, including for parks. A zero-budget place search
+can return candidates, clearly marked price unknown. No booking or route is made.
+Ticketmaster remains the source for scheduled events. Yelp is no longer used.
 
-Restaurant cards show source photos when available, address and Yelp price tier.
-A tier is NOT an exact per-person price: budget is a target, not a verified filter.
-Opening hours, dietary suitability and table availability are unverified. The
-suggested meal starts at your shared availability and lasts up to one hour.
-Both participants must approve; changes to business details clear prior approvals.
-After confirmation, ordinary reusable links open a calendar draft, Yelp listing
-(for restaurant information and any booking options), and Google Maps. No booking
-or payment is made. Combined dinner-plus-event itineraries are not implemented.
-Demo mode uses explicitly fictional restaurant fixtures.
+This first version requests a small explicit field mask, omitting paid rating,
+price, review and photo fields. Place cards use text with Google Maps attribution;
+no credential-bearing photo URL is sent to the client. Ticketmaster image cards
+remain available. Demo fixtures are fictional.
 
-API contracts: https://docs.developer.yelp.com/reference/v3_business_search and
-https://docs.developer.yelp.com/reference/v3_business_info . Before public launch,
-verify your Yelp plan's access, display/attribution and data retention requirements.
+Before public release, review Google Places display, storage and privacy policies:
+https://developers.google.com/maps/documentation/places/web-service/policies .
+The current planner persists candidate payloads in SQLite and chat receipts; its
+storage must be adapted to Google's requirements before deploying Places publicly.
+This integration is for local evaluation until that work and live API validation
+are complete. Multi-stop itineraries and proximity/travel-time ranking are not yet
+implemented.

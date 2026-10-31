@@ -84,70 +84,82 @@ class Ticketmaster:
         return result
 
 
-class YelpRestaurants:
-    """Places are candidates, not verified meal prices or table reservations."""
+class GooglePlaces:
+    """Place candidates, never evidence of a reservation or exact admission cost."""
     mode = "live"
+    fields = "id,displayName,formattedAddress,addressComponents,googleMapsUri,businessStatus,attributions"
 
     def __init__(self, key=None):
-        self.key = key or os.getenv("YELP_API_KEY")
+        self.key = key or os.getenv("GOOGLE_PLACES_API_KEY")
 
-    def normalize(self, item, start, end):
-        url = item.get("url", "")
-        if not item.get("id") or urlparse(url).scheme != "https":
-            return None
-        location = item.get("location") or {}
-        address = ", ".join(location.get("display_address") or [])
-        image = item.get("image_url", "")
-        return dict(id="yelp:" + item["id"], kind="restaurant", title=item.get("name", "Restaurant"),
-                    start=start, end=end, city=location.get("city", ""), venue=address or item.get("name", ""),
-                    image=image if urlparse(image).scheme == "https" else None,
-                    price_min=None, price_max=None, price_level=item.get("price") or "Price unknown",
-                    status="closed" if item.get("is_closed") else "candidate", url=url,
-                    map_url="https://www.google.com/maps/search/?" + urlencode({"api": 1, "query": item.get("name", "") + " " + address}),
-                    checked_at=datetime.now(timezone.utc).isoformat(), demo=False,
-                    availability="Suggested meal time only. Hours, dietary needs, exact price and tables not verified.")
-
-    def headers(self):
+    def headers(self, search=False):
         if not self.key:
-            raise ProviderError("餐厅搜索尚未启用：请在本地 .env 配置 YELP_API_KEY 并重启 agent。活动搜索仍可使用；不会用虚构餐厅替代。")
-        return {"Authorization": "Bearer " + self.key}
+            raise ProviderError("地点探索尚未启用：请配置 GOOGLE_PLACES_API_KEY，启用 Places API (New) 后重启 agent。演出搜索仍可使用。")
+        fields = self.fields.split(",")
+        return {"X-Goog-Api-Key": self.key,
+                "X-Goog-FieldMask": ",".join("places." + f for f in fields) if search else self.fields}
+
+    def normalize(self, item, start, end, kind):
+        place_id = item.get("id")
+        name = item.get("displayName", {}).get("text")
+        url = item.get("googleMapsUri", "")
+        if not place_id or not name or urlparse(url).scheme != "https":
+            return None
+        components = item.get("addressComponents", [])
+        city = next((c.get("longText", "") for c in components if "locality" in c.get("types", [])), "")
+        # Avoid displaying third-party content whose attribution cannot fit this card.
+        if item.get("attributions"):
+            return None
+        return dict(id="google:" + place_id, kind=kind, title=name, source="Google Maps",
+                    start=start, end=end, city=city, venue=item.get("formattedAddress", name),
+                    price_min=None, price_max=None, price_level="Price unknown",
+                    status="closed" if item.get("businessStatus", "").startswith("CLOSED") else "candidate",
+                    url=url, map_url=url, checked_at=datetime.now(timezone.utc).isoformat(), demo=False,
+                    availability="Suggested visit time only. Opening hours, admission/menu prices and availability not verified.")
 
     async def search(self, constraints):
-        headers = self.headers()
+        headers = self.headers(search=True)
         start = datetime.fromisoformat(constraints["start"].replace("Z", "+00:00"))
         end = min(start + timedelta(hours=1), datetime.fromisoformat(constraints["end"].replace("Z", "+00:00")))
         found = {}
+        kind = constraints.get("kind", "place")
+        term = constraints.get("interest") or ("restaurants" if kind == "restaurant" else "parks museums attractions")
         for city in constraints.get("cities", [constraints["city"]]):
-            raw = await request_json("GET", "https://api.yelp.com/v3/businesses/search", headers=headers,
-                                     params={"location": city + ", CA, US", "categories": "restaurants",
-                                             "term": constraints.get("interest") or "restaurants", "limit": 20})
-            for item in raw.get("businesses", []):
-                result = self.normalize(item, constraints["start"], end.isoformat())
+            body = {"textQuery": term + " in " + city + ", California, USA", "pageSize": 10, "languageCode": "en"}
+            if kind == "restaurant":
+                body.update(includedType="restaurant", strictTypeFiltering=True)
+            raw = await request_json("POST", "https://places.googleapis.com/v1/places:searchText",
+                                     headers=headers, json=body)
+            for item in raw.get("places", []):
+                result = self.normalize(item, constraints["start"], end.isoformat(), kind)
                 if result:
                     found[result["id"]] = result
         return list(found.values())
 
     async def refresh(self, event):
-        raw = await request_json("GET", "https://api.yelp.com/v3/businesses/" + quote(event["id"].removeprefix("yelp:"), safe=""), headers=self.headers())
-        result = self.normalize(raw, event["start"], event["end"])
+        if not event["id"].startswith("google:"):
+            raise ProviderError("This place came from an older search provider. Please search again.")
+        raw = await request_json("GET", "https://places.googleapis.com/v1/places/" +
+                                 quote(event["id"].removeprefix("google:"), safe=""), headers=self.headers())
+        result = self.normalize(raw, event["start"], event["end"], event["kind"])
         if not result:
-            raise ProviderError("This restaurant is no longer available. Please search again.")
+            raise ProviderError("This place is no longer available. Please search again.")
         return result
 
 
 class Discovery:
     mode = "live"
 
-    def __init__(self, events=None, restaurants=None):
+    def __init__(self, events=None, places=None):
         self.events = events or Ticketmaster()
-        self.restaurants = restaurants or YelpRestaurants()
+        self.places = places or GooglePlaces()
 
     async def search(self, constraints):
-        provider = self.restaurants if constraints.get("kind") == "restaurant" else self.events
+        provider = self.places if constraints.get("kind") in {"restaurant", "place"} else self.events
         return await provider.search(constraints)
 
     async def refresh(self, event):
-        provider = self.restaurants if event.get("kind") == "restaurant" else self.events
+        provider = self.places if event.get("kind") in {"restaurant", "place"} else self.events
         return await provider.refresh(event)
 
 
@@ -156,9 +168,9 @@ class DemoEvents:
 
     async def search(self, constraints):
         start = datetime.fromisoformat(constraints["start"].replace("Z", "+00:00"))
-        if constraints.get("kind") == "restaurant":
+        if constraints.get("kind") in {"restaurant", "place"}:
             end = min(start + timedelta(hours=1), datetime.fromisoformat(constraints["end"].replace("Z", "+00:00")))
-            return [dict(id=f"demo-food-{i}", kind="restaurant", title=f"DEMO — {title}",
+            return [dict(id=f"demo-food-{i}", kind=constraints["kind"], title=f"DEMO — {title}",
                          start=start.isoformat(), end=end.isoformat(), city=constraints["city"],
                          venue="Fictional demo restaurant", price_min=None, price_max=None, price_level="$$",
                          status="candidate", url="https://example.com/demo-only", map_url="https://example.com/demo-only",
@@ -194,13 +206,13 @@ class ASIInterpreter:
             "and NEVER records approval. Use edit for '重新计划' without new details; it opens preferences "
             "without deleting anything. For ordinary planning language use conversation. "
             "Its preferences is an object with only explicitly stated city,start,end,budget,interest,kind. "
-            "kind is restaurant for eating out, food, cafes or cuisine requests; event for activities or concerts. "
+            "kind is restaurant for dining and cuisine; place for cafes, parks, museums, sightseeing, walks, photography spots or general places to hang out; event for scheduled events and concerts. For place requests translate interest into a concise English place search term. Do not infer event merely from the generic word activity. "
             "For restaurant requests, interest is the cuisine or food keyword in English (火锅 = hot pot, 日料 = Japanese); use restaurants if unspecified. "
-            "Do not infer dietary safety or bookings. If asked for dinner plus an event, ask which to plan first.  "
+            "Do not infer dietary safety or bookings. If asked for multiple stops, ask which to plan first; never claim to have planned a route. For quiet, scenic or photogenic requests, use these as search terms but never claim these qualities are verified.  "
             "city may be a list when multiple locations work. Normalize SF/san fran/旧金山 to San Francisco "
             "and 伯克利 to Berkeley. 'berkeley/san fran area' means city ['Berkeley','San Francisco'], "
             "NOT an unsupported city. Never drop one of two explicitly acceptable cities. "
-            "search is a boolean: true for asking about things to do, concerts, events, restaurants, food or recommendations. "
+            "search is a boolean: true for asking about things to do, concerts, events, restaurants, food, parks, sightseeing, places or recommendations. "
             "language is zh for Chinese, en otherwise. question is a short clarification in the speaker's language "
             "only if their request is ambiguous, otherwise omit it. Never return commands or JSON as question. "
             "A message may BOTH update preferences AND request search. Translate concert/演唱会/音乐会 to "
