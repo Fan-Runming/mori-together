@@ -352,7 +352,7 @@ class Planner:
             return self.preferences_card(p)
         if action in {"calendar", "event_link"}:
             if not p["selected"] or p["state"] != "confirmed":
-                raise ValueError("Both people need to confirm the plan first.")
+                raise UserError("Both people need to confirm the plan first.")
             # ASI cards can become locked after one selection. Always expose both
             # destinations as ordinary links, independent of the consumed card.
             links = {
@@ -393,10 +393,10 @@ class Planner:
             return Reply("可以帮你们找活动。先创建一个双人计划，或用朋友的邀请码加入；加入后直接说时间、地点和预算即可。" if zh else
                          "I can help you find something to do. First create a shared plan or join your friend's invite; then tell me your availability, city and budget in your own words.")
         if p["mode"] != self.provider.mode:
-            raise ValueError("This plan belongs to another mode. Use a separate database for live and demo runs.")
+            raise UserError("This plan belongs to another mode. Use a separate database for live and demo runs.")
         prefs = cmd.get("preferences", {})
         if not isinstance(prefs, dict):
-            raise ValueError("Please describe your availability, city or budget again.")
+            raise UserError("Please describe your availability, city or budget again.")
         allowed = {"city", "start", "end", "budget", "interest"}
         updates = {k: v for k, v in prefs.items() if k in allowed and v != p["members"][actor]["preferences"].get(k)}
         if updates:
