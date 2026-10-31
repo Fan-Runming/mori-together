@@ -45,6 +45,43 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         result = await self.p.handle("b", "@mori-together " + json.dumps({"action":"confirm", "version":v}))
         self.assertEqual(result.card_kind, "detail")
 
+    async def test_natural_request_updates_only_speaker_and_searches(self):
+        async def interpret(text, context):
+            self.assertEqual(text, "最近有什么concert？预算20美元")
+            self.assertNotIn("members", context)
+            return {"action": "conversation", "language": "zh", "preferences": {"budget": 20, "interest": "music"}, "search": True}
+        self.p.interpreter.interpret = interpret
+        result = await self.p.handle("a", "@mori 最近有什么concert？预算20美元")
+        self.assertEqual(result.card_kind, "carousel")
+        plan = self.store.current("a")
+        self.assertEqual(plan["members"]["a"]["preferences"]["budget"], 20)
+        self.assertEqual(plan["members"]["b"]["preferences"]["budget"], 30)
+        self.assertNotIn("select demo", result.text)
+
+    async def test_natural_followup_resumes_pending_search(self):
+        await self.p.handle("b", "forget")
+        async def interpret(text, context):
+            if text == "有什么好玩的":
+                return {"action": "conversation", "language": "zh", "preferences": {}, "search": True}
+            return {"action": "conversation", "preferences": self.pref, "search": False}
+        self.p.interpreter.interpret = interpret
+        result = await self.p.handle("a", "有什么好玩的")
+        self.assertIsNone(result.card_kind)
+        self.assertTrue(self.store.current("a")["search_requested"])
+        result = await self.p.handle("b", "这是我的时间和预算")
+        self.assertEqual(result.card_kind, "carousel")
+        self.assertFalse(self.store.current("a")["search_requested"])
+
+    async def test_ambiguous_natural_request_preserves_plan(self):
+        await self.proposed()
+        before = self.store.current("a")
+        async def interpret(text, context):
+            return {"action": "conversation", "question": "你说的是哪个周末？", "preferences": {}, "search": False}
+        self.p.interpreter.interpret = interpret
+        result = await self.p.handle("a", "那个周末呢")
+        self.assertEqual(result.text, "你说的是哪个周末？")
+        self.assertEqual(self.store.current("a"), before)
+
     async def test_complete_and_repeat_is_not_two_people(self):
         v = await self.proposed()
         await self.p.handle("a", f"confirm {v}")

@@ -127,6 +127,7 @@ class Planner:
         plan = self.store.current(actor)
         # Do not send other participants' data, invitations or internal identities to the LLM.
         context = {"now": self.now().isoformat(), "timezone": "America/Los_Angeles",
+                   "has_plan": bool(plan),
                    "my_preferences": plan["members"][actor]["preferences"] if plan else {}}
         return await self.interpreter.interpret(text, context)
 
@@ -182,6 +183,8 @@ class Planner:
 
     async def execute(self, actor, cmd):
         action = cmd.get("action")
+        if action == "conversation":
+            return await self.conversation(actor, cmd)
         if action == "help":
             return Reply(HELP)
         if action == "new":
@@ -266,8 +269,9 @@ class Planner:
             p["events"] = events[:3]
             p["state"] = "options"
             self.store.save(p)
-            return Reply("Options match your shared city/time and listed USD price cap. Fees, two-person inventory and any unknown end time require checking.\n" +
-                         "\n".join(f"select {e['id']} — {e['title']} | {e['start']} | up to ${e['price_max']} | {e['url']}" for e in p["events"]), "carousel", {
+            p["search_requested"] = False
+            self.store.save(p)
+            return Reply("Here are a few options for you two. Choose one to review together. Listed prices exclude unverified fees.", "carousel", {
                 "title": "A few ways to spend time together",
                 "subtitle": "DEMO fixtures — not real events" if self.provider.mode == "demo" else "Ticketmaster • prices exclude unverified fees",
                 "items": [{"id": e["id"], "title": e["title"], "subtitle": f"{e['venue']} · {e['start']}",
@@ -330,6 +334,49 @@ class Planner:
                 return r
             return self.summary(p)
         raise ValueError("Unsupported action. Type help.")
+
+    async def conversation(self, actor, cmd):
+        """Accumulate this speaker's facts and resume an explicitly requested search."""
+        zh = cmd.get("language") == "zh"
+        p = self.store.current(actor)
+        if not p:
+            return Reply("可以帮你们找活动。先创建一个双人计划，或用朋友的邀请码加入；加入后直接说时间、地点和预算即可。" if zh else
+                         "I can help you find something to do. First create a shared plan or join your friend's invite; then tell me your availability, city and budget in your own words.")
+        if p["mode"] != self.provider.mode:
+            raise ValueError("This plan belongs to another mode. Use a separate database for live and demo runs.")
+        prefs = cmd.get("preferences", {})
+        if not isinstance(prefs, dict):
+            raise ValueError("Please describe your availability, city or budget again.")
+        allowed = {"city", "start", "end", "budget", "interest"}
+        updates = {k: v for k, v in prefs.items() if k in allowed and v != p["members"][actor]["preferences"].get(k)}
+        if updates:
+            await self.execute(actor, {"action": "preferences", **updates})
+            p = self.store.current(actor)
+        if cmd.get("search") is True:
+            p["search_requested"] = True
+        self.store.save(p)
+        question = cmd.get("question")
+        if isinstance(question, str) and question.strip():
+            return Reply(question.strip()[:400])
+        labels = {"city": "城市" if zh else "city", "start": "开始有空的时间" if zh else "available from",
+                  "end": "结束时间" if zh else "available until", "budget": "每人预算上限" if zh else "budget per person",
+                  "interest": "想做什么" if zh else "activity interests"}
+        missing = [label for key, label in labels.items() if key not in p["members"][actor]["preferences"]]
+        if missing:
+            return Reply(("记下了。还需要你的" + "、".join(missing) + "，直接用平常说话的方式告诉我就好。") if zh else
+                         "Got it. I still need your " + ", ".join(missing) + ". You can tell me in your own words.")
+        if p.get("search_requested"):
+            try:
+                self.constraints(p)
+            except ValueError as error:
+                return Reply(("已记下你的信息。还需要你们双方有一致的城市、重合的空闲时间，以及各自的预算和兴趣，才能找到共同合适的活动。" if zh else
+                              "I've saved your preferences. " + str(error) + " They can reply in their own words."))
+            result = await self.execute(actor, {"action": "search"})
+            if zh and result.card_kind:
+                result.text = "找到几个符合你们共同时间、地点和预算的活动，选一个一起看看吧。标价不含未核实的手续费。"
+            return result
+        return Reply("记下你的偏好了。想看推荐时，直接问我附近有什么好玩的就行。" if zh else
+                     "I've saved your preferences. Ask me what's on nearby whenever you'd like recommendations.")
 
     def details(self, p):
         return "\n".join(f"{m['name']}: {json.dumps(m['preferences'], ensure_ascii=False)}" for m in p["members"].values())

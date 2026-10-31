@@ -101,8 +101,19 @@ class ASIInterpreter:
             raise ProviderError("Natural language needs ASI_ONE_API_KEY. Structured commands and cards still work; type help.")
         prompt = (
             "You interpret requests for Mori Together. Return ONLY a JSON object. "
-            "Allowed actions: new (name), join (code,name), preferences (city,start,end,budget,interest), "
-            "search, status, help. Dates must be ISO8601 with timezone; use America/Los_Angeles "
+            "Allowed actions: new (name), join (code,name), conversation (preferences,search,question,language), "
+            "status, calendar, event_link, help. For ordinary planning language use conversation. "
+            "Its preferences is an object with only explicitly stated city,start,end,budget,interest. "
+            "search is a boolean: true for asking about things to do, concerts, events or recommendations. "
+            "language is zh for Chinese, en otherwise. question is a short clarification in the speaker's language "
+            "only if their request is ambiguous, otherwise omit it. Never return commands or JSON as question. "
+            "A message may BOTH update preferences AND request search. Translate concert/演唱会/音乐会 to "
+            "interest music. Use existing my_preferences for short followups. Never invent city, budget, "
+            "or availability. 'Recently/最近' alone is not availability: ask what dates work. "
+            "For a specified date without hours ask for hours rather than silently assuming all day. "
+            "Examples: 最近有什么好玩的concert => conversation, preferences interest music, search true; "
+            "我最多40美元 => conversation, preferences budget 40, search false. "
+            "Dates must be ISO8601 with timezone; use America/Los_Angeles "
             "for local SF/Berkeley dates, respecting DST. budget is USD per person. "
             "Only extract THIS speaker's explicitly stated constraints, never their friend's. "
             "Omit unknown fields; no inventions. For confirming, selecting, deleting or changing consent, "
@@ -121,7 +132,7 @@ class ASIInterpreter:
                 content = content.split("\n", 1)[1].rsplit("```", 1)[0]
             result = json.loads(content)
             if not isinstance(result, dict) or result.get("action") not in {
-                "new", "join", "preferences", "search", "status", "help"}:
+                "new", "join", "conversation", "status", "calendar", "event_link", "help"}:
                 raise ValueError()
             return result
         except (KeyError, IndexError, ValueError, TypeError):

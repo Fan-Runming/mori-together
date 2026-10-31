@@ -13,11 +13,18 @@ The original Mori product is separate and is not required for this workflow.
   individual confirmations, calendar draft, forget/delete, idempotent message handling.
 - Implemented adapters: Agent Chat Protocol 0.3.0, ASI:One interactive form/carousel/
   review cards, ASI-1 natural-language intent interpretation, Ticketmaster Discovery.
-- Verified locally: 17 automated tests and an end-to-end OFFLINE demo. SDK imports
+- Verified locally: 23 automated tests and an end-to-end OFFLINE demo. SDK imports
   and outgoing ACP message/card serialization checked against installed uAgents.
-- Not yet verified: real ASI-1 requests, Ticketmaster queries, Agentverse registration,
-  ASI:One discovery/cards, session continuity and two-user transport behavior.
-- Not deployed, not submitted to the hackathon, no public GitHub repo created yet.
+- Live walkthrough completed: Agentverse connection, Ticketmaster results, ASI:One
+  cards and approvals from two accounts in one shared conversation.
+- Natural-language planning now accumulates the speaker's preferences, asks for
+  missing facts and resumes a requested search when both participants are ready.
+  These orchestration paths have mocked-interpreter regression coverage; the new
+  interpreter prompt still needs a live ASI:One walkthrough after restart.
+- Ordinary group messages are not proven to reach Mori. ASI:One currently routes
+  unmentioned messages to the user's personal AI. Do not claim background listening.
+- Public source: https://github.com/Fan-Runming/mori-together. The agent still runs
+  locally; always-on hosting and hackathon submission remain to be completed.
 
 **Demo mode uses fictional fixtures and simulated identities. It is not evidence of
 live search, ticket inventory, independent human approvals, or real user testing.**
