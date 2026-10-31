@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from mori_together.core import Planner, Store, Reply, principal
+from mori_together.core import Planner, Store, Reply, principal, instant, PILOT_TZ
 from mori_together.providers import DemoEvents, Ticketmaster, ProviderError
 
 
@@ -187,9 +187,45 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         await self.p.handle("b", "preferences " + json.dumps(later))
         self.assertIn("overlapping", (await self.p.handle("a", "search")).text)
 
-    async def test_reject_nan_budget_and_naive_time(self):
+    async def test_reject_nan_budget_and_unreadable_time(self):
         self.assertIn("budget", (await self.p.handle("a", 'preferences {"budget":"NaN"}')).text)
-        self.assertIn("timezone", (await self.p.handle("a", 'preferences {"start":"2026-11-03T12:00:00"}')).text)
+        self.assertIn("2026-11-03 14:00", (await self.p.handle("a", 'preferences {"start":"tomorrow 2pm"}')).text)
+
+    async def test_times_without_offset_are_pacific(self):
+        day = (self.now + timedelta(days=2)).astimezone(PILOT_TZ).strftime("%Y-%m-%d")
+        await self.p.handle("a", "preferences " + json.dumps({"start": f"{day} 2pm", "end": f"{day} 18:00", "budget": "$25"}))
+        pref = self.store.current("a")["members"]["a"]["preferences"]
+        expected = datetime.fromisoformat(f"{day}T14:00").replace(tzinfo=PILOT_TZ).astimezone(timezone.utc)
+        self.assertEqual(instant(pref["start"]), expected)
+        self.assertEqual(pref["budget"], 25)
+
+    async def test_partner_update_does_not_void_preferences_card(self):
+        card = (await self.p.handle("a", "status")).card_payload["submit_cta"]["selection"]
+        await self.p.handle("b", 'preferences {"budget":20}')
+        result = await self.p.handle("a", json.dumps({**card, "budget": 15}))
+        self.assertIn("Saved", result.text)
+        self.assertEqual(self.store.current("a")["members"]["a"]["preferences"]["budget"], 15)
+
+    async def test_bare_confirm_shows_proposal_without_approving(self):
+        await self.proposed()
+        result = await self.p.handle("b", "confirm")
+        self.assertIn("Not approved yet", result.text)
+        self.assertEqual(result.card_kind, "review")
+        self.assertEqual(self.store.current("a")["approvals"], [])
+
+    async def test_internal_errors_are_not_shown(self):
+        result = await self.p.handle("a", "preferences {not json")
+        self.assertIn("type help", result.text)
+        self.assertNotIn("Expecting", result.text)
+
+    async def test_partner_activity_reported_once(self):
+        v = await self.proposed()
+        await self.p.handle("a", f"confirm {v}")
+        first = (await self.p.handle("b", "status")).text
+        self.assertIn("Alice proposed DEMO", first)
+        self.assertIn("Alice said the proposal works", first)
+        self.assertNotIn("Since your last message", (await self.p.handle("b", "status")).text)
+        self.assertNotIn("• Alice", (await self.p.handle("a", "status")).text)
 
     async def test_forget_erases_preferences_and_receipts(self):
         await self.p.handle("a", "status", "receipt")
