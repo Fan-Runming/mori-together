@@ -259,6 +259,26 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(msg.content[1].metadata["card_payload"].encode()), 65536)
         self.assertTrue(wire_reply(Reply("hello")).msg_id)
 
+    def test_message_shape_omits_content(self):
+        from uuid import uuid4
+        from agent import message_shape
+        from uagents_core.contrib.protocols.chat import (
+            ChatMessage, TextContent, MetadataContent, ResourceContent, Resource)
+        secret = "@mori dinner with Sam at 7, https://example.com/secret-event"
+        msg = ChatMessage([TextContent(secret), MetadataContent({"card_selection": "private-value"}),
+                           ResourceContent(uuid4(), Resource(uri="https://example.com/private.png",
+                                                             metadata={"mime_type": "image/png", "role": "image"}))])
+        shape = json.dumps(message_shape("agent1qsender", "session-1", msg))
+        for leaked in ("Sam", "secret-event", "private-value", "private.png", "agent1qsender", "session-1"):
+            self.assertNotIn(leaked, shape)
+        self.assertIn('"type": "resource"', shape)
+        self.assertIn('"card_selection"', shape)
+        unusual = ChatMessage([MetadataContent({"private-field-name": "secret"}),
+            ResourceContent(uuid4(), Resource(uri="private-scheme:secret", metadata={"mime_type": "private-value"}))])
+        redacted = json.dumps(message_shape("sender", "session", unusual))
+        for secret_value in ("private-field-name", "private-scheme", "private-value", "secret"):
+            self.assertNotIn(secret_value, redacted)
+
     async def test_store_survives_restart(self):
         with tempfile.TemporaryDirectory() as folder:
             path = str(Path(folder) / "state.db")
