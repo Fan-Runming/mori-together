@@ -58,6 +58,52 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["members"]["b"]["preferences"]["budget"], 30)
         self.assertNotIn("select demo", result.text)
 
+    async def test_natural_choice_and_assent_show_review_without_approval(self):
+        await self.p.handle("a", "search")
+        async def interpret(text, context):
+            self.assertEqual(context["options"][0]["number"], 1)
+            if text == "选第一个":
+                return {"action": "choose", "number": 1}
+            return {"action": "review", "version": 999, "actor": "b"}
+        self.p.interpreter.interpret = interpret
+        chosen = await self.p.handle("a", "选第一个")
+        self.assertEqual(chosen.card_kind, "review")
+        self.assertEqual(self.store.current("a")["selected"]["id"], "demo-0")
+        review = await self.p.handle("a", "这个可以")
+        self.assertEqual(review.card_kind, "review")
+        self.assertIn("Not approved", review.text)
+        self.assertEqual(self.store.current("a")["approvals"], [])
+
+    async def test_natural_status_reuses_options_without_search(self):
+        first = await self.p.handle("a", "search")
+        async def interpret(text, context):
+            return {"action": "status"}
+        async def unexpected_search(*args):
+            raise AssertionError("Reviewing options must not query provider again")
+        self.p.interpreter.interpret = interpret
+        self.provider.search = unexpected_search
+        result = await self.p.handle("b", "我们现在计划到哪一步了")
+        self.assertEqual(result.card_payload, first.card_payload)
+
+    async def test_invalid_natural_choice_does_not_change_plan(self):
+        await self.p.handle("a", "search")
+        before = self.store.current("a")
+        async def interpret(text, context):
+            return {"action": "choose", "number": 99}
+        self.p.interpreter.interpret = interpret
+        result = await self.p.handle("a", "选第99个")
+        self.assertIn("Which option", result.text)
+        self.assertEqual(self.store.current("a"), before)
+
+    async def test_currency_restatement_does_not_clear_approval(self):
+        v = await self.proposed()
+        await self.p.handle("a", f"confirm {v}")
+        async def interpret(text, context):
+            return {"action": "conversation", "preferences": {"budget": "$30 USD"}}
+        self.p.interpreter.interpret = interpret
+        await self.p.handle("b", "我的预算还是30美元")
+        self.assertEqual(self.store.current("a")["approvals"], ["a"])
+
     async def test_natural_followup_resumes_pending_search(self):
         await self.p.handle("b", "forget")
         async def interpret(text, context):
@@ -290,6 +336,12 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         expected = datetime.fromisoformat(f"{day}T14:00").replace(tzinfo=PILOT_TZ).astimezone(timezone.utc)
         self.assertEqual(instant(pref["start"]), expected)
         self.assertEqual(pref["budget"], 25)
+
+    def test_invalid_or_ambiguous_local_times_are_not_silently_changed(self):
+        for value in ("2026-11-03 13pm", "2026-11-03 0am", "2026-11-01 01:30", "2027-03-14 02:30"):
+            with self.assertRaises(ValueError):
+                instant(value)
+        self.assertEqual(instant("2026-11-01T01:30:00-08:00").hour, 9)
 
     async def test_partner_update_does_not_void_preferences_card(self):
         card = (await self.p.handle("a", "edit")).card_payload["submit_cta"]["selection"]
