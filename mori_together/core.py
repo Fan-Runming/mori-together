@@ -314,9 +314,15 @@ class Planner:
         if action in {"calendar", "event_link"}:
             if not p["selected"] or p["state"] != "confirmed":
                 raise ValueError("Both people need to confirm the plan first.")
-            if action == "calendar":
-                return Reply("[Open calendar draft](" + self.calendar_url(p["selected"]) + ")\nReview the details, then save it to your calendar.")
-            return Reply("[View event and tickets](" + p["selected"]["url"] + ")\nCheck final fees and ticket availability before booking.")
+            # ASI cards can become locked after one selection. Always expose both
+            # destinations as ordinary links, independent of the consumed card.
+            links = {
+                "calendar": "[Open calendar draft](" + self.calendar_url(p["selected"]) + ")",
+                "event_link": "[View event and tickets](" + p["selected"]["url"] + ")",
+            }
+            other = "event_link" if action == "calendar" else "calendar"
+            return Reply(links[action] + "\n\n" + links[other] +
+                         "\n\nSave the calendar draft yourself. Tickets aren't booked; check final fees and availability.")
         if action == "status":
             if not p["selected"]:
                 r = self.preferences_card(p)

@@ -68,6 +68,10 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         for cta, expected in zip(result.card_payload["ctas"], ["calendar.google.com", "View event and tickets"]):
             response = await self.p.handle("a", json.dumps(cta["selection"]))
             self.assertIn(expected, response.text)
+            self.assertIn("[Open calendar draft](https://calendar.google.com/", response.text)
+            self.assertIn("[View event and tickets](", response.text)
+            self.assertIsNone(response.card_kind)
+            self.assertEqual(self.store.current("a")["state"], "confirmed")
         await self.p.handle("b", 'preferences {"budget":10}')
         stale = await self.p.handle("a", json.dumps(result.card_payload["ctas"][0]["selection"]))
         self.assertIn("changed", stale.text)
