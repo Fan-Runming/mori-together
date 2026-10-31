@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, quote, urlencode
 
@@ -87,7 +88,7 @@ class Ticketmaster:
 class GooglePlaces:
     """Place candidates, never evidence of a reservation or exact admission cost."""
     mode = "live"
-    fields = "id,displayName,formattedAddress,addressComponents,googleMapsUri,businessStatus,attributions"
+    fields = "id,displayName,formattedAddress,addressComponents,googleMapsUri,businessStatus,attributions,photos"
 
     def __init__(self, key=None):
         self.key = key or os.getenv("GOOGLE_PLACES_API_KEY")
@@ -117,6 +118,34 @@ class GooglePlaces:
                     url=url, map_url=url, checked_at=datetime.now(timezone.utc).isoformat(), demo=False,
                     availability="Suggested visit time only. Opening hours, admission/menu prices and availability not verified.")
 
+    async def add_photo(self, result, item):
+        # Resolve fresh photo resources server-side. Never expose the API key or
+        # persist a photo resource name in plan/card payloads.
+        photos = item.get("photos") or []
+        photo = next((p for p in photos if re.fullmatch(r"places/[^/]+/photos/[^/]+", p.get("name", ""))), None)
+        if not photo:
+            return result
+        try:
+            raw = await request_json("GET", "https://places.googleapis.com/v1/" + photo["name"] + "/media",
+                                     headers={"X-Goog-Api-Key": self.key},
+                                     params={"maxWidthPx": 1000, "skipHttpRedirect": "true"})
+            uri = raw.get("photoUri", "")
+            parsed = urlparse(uri)
+            if parsed.scheme != "https" or not (parsed.hostname or "").endswith(".googleusercontent.com") or self.key in uri:
+                return result
+            credits = []
+            for author in photo.get("authorAttributions", []):
+                name = str(author.get("displayName", "Photographer"))
+                link = str(author.get("uri", ""))
+                if link.startswith("//"):
+                    link = "https:" + link
+                credits.append({"name": name, "url": link if urlparse(link).scheme == "https" else ""})
+            result.update(image=uri, photo_credits=credits)
+        except ProviderError:
+            # An unavailable photo must not hide an otherwise useful place.
+            pass
+        return result
+
     async def search(self, constraints):
         headers = self.headers(search=True)
         start = datetime.fromisoformat(constraints["start"].replace("Z", "+00:00"))
@@ -132,9 +161,10 @@ class GooglePlaces:
                                      headers=headers, json=body)
             for item in raw.get("places", []):
                 result = self.normalize(item, constraints["start"], end.isoformat(), kind)
-                if result:
-                    found[result["id"]] = result
-        return list(found.values())
+                if result and result["city"].lower() in {c.lower() for c in constraints.get("cities", [constraints["city"]])} and result["status"] == "candidate":
+                    found[result["id"]] = (result, item)
+        # Only resolve photos for the three cards that will actually be shown.
+        return [await self.add_photo(result, item) for result, item in list(found.values())[:3]]
 
     async def refresh(self, event):
         if not event["id"].startswith("google:"):
@@ -144,7 +174,7 @@ class GooglePlaces:
         result = self.normalize(raw, event["start"], event["end"], event["kind"])
         if not result:
             raise ProviderError("This place is no longer available. Please search again.")
-        return result
+        return await self.add_photo(result, raw)
 
 
 class Discovery:

@@ -200,10 +200,13 @@ verified. Unknown cost is not free, including for parks. A zero-budget place sea
 can return candidates, clearly marked price unknown. No booking or route is made.
 Ticketmaster remains the source for scheduled events. Yelp is no longer used.
 
-This first version requests a small explicit field mask, omitting paid rating,
-price, review and photo fields. Place cards use text with Google Maps attribution;
-no credential-bearing photo URL is sent to the client. Ticketmaster image cards
-remain available. Demo fixtures are fictional.
+Place cards now request photo metadata and resolve one real cover per displayed
+candidate (up to three). The server sends the key only in the request header and
+passes a key-free Google image URL to the card. Photographer names appear beside
+the photo and author profile links accompany the reply. Missing/failed photos
+fall back to text cards. Photo resource names are not saved; old image URLs may
+expire, so a new search refreshes them. Photo requests may incur additional usage.
+Rating, price and review fields are not requested. Demo fixtures are fictional.
 
 Before public release, review Google Places display, storage and privacy policies:
 https://developers.google.com/maps/documentation/places/web-service/policies .

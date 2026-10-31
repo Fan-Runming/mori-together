@@ -473,8 +473,28 @@ class Planner:
             return r
         raise UserError("Unsupported action. Type help.")
 
+    @staticmethod
+    def photo_caption(e):
+        if not e.get("image") or e.get("source") != "Google Maps":
+            return ""
+        names = ", ".join(a["name"] for a in e.get("photo_credits", []))
+        return "Photo: " + (names + " · " if names else "") + "Google Maps"
+
+    @staticmethod
+    def photo_links(events):
+        lines = []
+        for e in events:
+            if not e.get("image") or e.get("source") != "Google Maps":
+                continue
+            authors = []
+            for a in e.get("photo_credits", []):
+                name = a["name"].replace("[", "").replace("]", "")
+                authors.append("[" + name + "](" + a["url"].replace(")", "%29") + ")" if a.get("url") else name)
+            lines.append(e["title"] + " — Photo: " + (", ".join(authors) + " · " if authors else "") + "Google Maps")
+        return "\n\n" + "\n".join(lines) if lines else ""
+
     def options_card(self, p):
-        return Reply("A little time together? Pick an idea to review with your friend.", "carousel", {
+        return Reply("A little time together? Pick an idea to review with your friend." + self.photo_links(p["events"]), "carousel", {
             "title": "Your next little adventure",
             "style": "slide",
             "subtitle": "DEMO · fictional activities" if self.provider.mode == "demo" else ("Places to explore · Google Maps · verify prices & hours" if p["events"][0].get("kind") in {"restaurant", "place"} else "For your shared time & budget · Ticketmaster"),
@@ -483,7 +503,7 @@ class Planner:
                        "subtitle": f"{local(e['start'])}\n{e['venue']} · {e['city']}",
                        "badges": [{"label": "Price unverified" if e.get("kind") in {"restaurant", "place"} else "Within shared budget", "variant": "info"},
                                   {"label": self.price_label(e), "variant": "info"}],
-                       "secondary_text": e.get("availability") if e.get("kind") in {"restaurant", "place"} else "Fits your shared availability. Final fees and ticket availability need checking.",
+                       "secondary_text": ("Suggested visit · check hours & cost. " + self.photo_caption(e)) if e.get("kind") in {"restaurant", "place"} else "Fits your shared availability. Final fees and ticket availability need checking.",
                        "primary_cta": {"label": "Let's consider this", "selection": {"action": "select", "event_id": e["id"], "plan_id": p["id"], "version": p["version"]}}}
                       for e in p["events"]]})
 
@@ -568,7 +588,7 @@ class Planner:
             result = await self.execute(actor, {"action": "search"})
             if zh and result.card_kind:
                 if self.constraints(p).get("kind") in {"restaurant", "place"}:
-                    result.text = "找到几个地点候选，选一个一起看看吧。费用和营业时间尚未核实，卡片时间只是共同空闲时段内的建议；并不代表已确认开放或符合预算。"
+                    result.text = "找到几个地点候选，选一个一起看看吧。费用和营业时间尚未核实，卡片时间只是共同空闲时段内的建议；并不代表已确认开放或符合预算。" + self.photo_links(self.store.current(actor)["events"])
                 else:
                     result.text = "找到几个符合你们共同时间、地点和预算的活动，选一个一起看看吧。标价不含未核实的手续费。"
             return result
@@ -661,11 +681,13 @@ class Planner:
                 {"label": "Per person", "value": self.price_label(e)},
                 {"label": "Who's in", "value": members},
                 {"label": "Visit details" if e.get("kind") in {"restaurant", "place"} else "Tickets", "value": e["availability"] if e.get("kind") in {"restaurant", "place"} else "Not booked · check availability and final price"}]
+        if self.photo_caption(e):
+            rows.append({"label": "Photo", "value": self.photo_caption(e)})
         text = "DEMO · " if e["demo"] else ""
         if p["state"] == "confirmed":
             if not e.get("end"):
                 rows.append({"label": "Calendar duration", "value": "1-hour placeholder; event end time is unknown"})
-            return Reply(text + "You're both in! Your shared plan is ready.", "detail", {
+            return Reply(text + "You're both in! Your shared plan is ready." + self.photo_links([e]), "detail", {
                 "title": "You're both in ✓", "summary_rows": rows,
                 **({"hero_image": e["image"]} if e.get("image") else {}),
                 "ctas": [

@@ -148,3 +148,28 @@ class RestaurantTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(reply.card_kind,'carousel')
             self.assertIn('费用和营业时间尚未核实',reply.text)
             self.assertNotIn('符合你们共同时间、地点和预算',reply.text)
+
+    async def test_photo_url_has_no_key_and_retains_attribution(self):
+        c=self.planner.constraints(self.store.current('a'))
+        event=self.places.normalize(self.item,c['start'],c['end'],'restaurant')
+        item={**self.item,'photos':[{'name':'places/fixture/photos/photo1','authorAttributions':[{'displayName':'Test Author','uri':'https://maps.google.com/maps/contrib/test'}]}]}
+        with patch('mori_together.providers.request_json',new_callable=AsyncMock,return_value={'photoUri':'https://lh3.googleusercontent.com/test-photo'}) as req:
+            event=await self.places.add_photo(event,item)
+            self.assertEqual(req.call_args.kwargs['headers']['X-Goog-Api-Key'],'test-only')
+            self.assertNotIn('key',req.call_args.kwargs['params'])
+        plan=self.store.current('a'); plan['events']=[event]
+        card=self.planner.options_card(plan)
+        self.assertEqual(card.card_payload['items'][0]['image'],event['image'])
+        self.assertIn('Test Author',card.card_payload['items'][0]['secondary_text'])
+        self.assertIn('https://maps.google.com/maps/contrib/test',card.text)
+        self.assertNotIn('test-only',json.dumps(card.card_payload))
+        self.assertNotIn('places/fixture/photos',json.dumps(event))
+
+    async def test_photo_failure_keeps_place_without_fabricated_image(self):
+        c=self.planner.constraints(self.store.current('a'))
+        event=self.places.normalize(self.item,c['start'],c['end'],'place')
+        item={**self.item,'photos':[{'name':'places/fixture/photos/photo1'}]}
+        with patch('mori_together.providers.request_json',side_effect=ProviderError('unavailable')):
+            result=await self.places.add_photo(event,item)
+        self.assertNotIn('image',result)
+        self.assertEqual(result['title'],event['title'])
