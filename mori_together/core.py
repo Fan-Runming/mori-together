@@ -564,7 +564,7 @@ class Planner:
 
     def explain(self, p, c):
         prefs = [m["preferences"] for m in p["members"].values()]
-        text = f"Searched {c['city']}, {local_range(c['start'], c['end'])}, up to ${c['budget']:g} per person"
+        text = f"Searched {' and '.join(c.get('cities', [c['city']]))}, {local_range(c['start'], c['end'])}, up to ${c['budget']:g} per person"
         if len({x["budget"] for x in prefs}) > 1:
             text += " (the lower of your two budgets)"
         text += "."
