@@ -273,6 +273,11 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(leaked, shape)
         self.assertIn('"type": "resource"', shape)
         self.assertIn('"card_selection"', shape)
+        unusual = ChatMessage([MetadataContent({"private-field-name": "secret"}),
+            ResourceContent(uuid4(), Resource(uri="private-scheme:secret", metadata={"mime_type": "private-value"}))])
+        redacted = json.dumps(message_shape("sender", "session", unusual))
+        for secret_value in ("private-field-name", "private-scheme", "private-value", "secret"):
+            self.assertNotIn(secret_value, redacted)
 
     async def test_store_survives_restart(self):
         with tempfile.TemporaryDirectory() as folder:

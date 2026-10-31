@@ -23,6 +23,11 @@ def short_hash(value):
 
 def message_shape(sender, session, msg):
     """Structure of an incoming message for channel testing. Never includes text, metadata values or URIs."""
+    safe_keys = {"card_selection", "card_kind", "card_payload", "card_protocol_version",
+                 "requires_card_interaction", "mime_type", "role"}
+    def metadata_shape(metadata):
+        return {"keys": sorted(k for k in metadata if k in safe_keys),
+                "other_key_count": sum(k not in safe_keys for k in metadata)}
     blocks = []
     for block in msg.content:
         item = {"type": getattr(block, "type", type(block).__name__)}
@@ -32,11 +37,12 @@ def message_shape(sender, session, msg):
             item["starts_with_mention"] = block.text.lstrip().startswith("@")
             item["has_url"] = "http" in block.text
         elif isinstance(block, MetadataContent):
-            item["keys"] = sorted(block.metadata)
+            item.update(metadata_shape(block.metadata))
         elif isinstance(block, ResourceContent):
             resources = block.resource if isinstance(block.resource, list) else [block.resource]
-            item["resources"] = [{"scheme": r.uri.split(":", 1)[0], "metadata_keys": sorted(r.metadata),
-                                  "mime_type": r.metadata.get("mime_type")} for r in resources]
+            item["resources"] = [{"scheme": r.uri.split(":", 1)[0] if r.uri.split(":", 1)[0] in
+                                  {"https", "http", "data", "ipfs"} else "other",
+                                  **metadata_shape(r.metadata)} for r in resources]
         blocks.append(item)
     return {"sender": short_hash(sender), "session": short_hash(session), "msg": short_hash(msg.msg_id),
             "timestamp": msg.timestamp.isoformat(), "blocks": blocks}
