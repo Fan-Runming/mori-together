@@ -82,6 +82,32 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.text, "你说的是哪个周末？")
         self.assertEqual(self.store.current("a"), before)
 
+    async def test_restated_preferences_keep_proposal(self):
+        v = await self.proposed()
+        await self.p.handle("a", f"confirm {v}")
+        start = datetime.fromisoformat(self.pref["start"]).astimezone(timezone(timedelta(hours=-8)))
+        async def interpret(text, context):
+            # Same instant and amount as stored, written the way the model tends to restate them.
+            return {"action": "conversation", "language": "en", "search": False,
+                    "preferences": {"start": start.isoformat(), "budget": "30", "city": "berkeley"}}
+        self.p.interpreter.interpret = interpret
+        result = await self.p.handle("b", "sounds fun, I'm free then anyway")
+        plan = self.store.current("a")
+        self.assertEqual(plan["approvals"], ["a"])
+        self.assertEqual(plan["version"], v)
+        self.assertNotIn("reset", result.text)
+        self.assertIn("saved your preferences", result.text)
+
+    async def test_real_change_tells_speaker_proposal_was_reset(self):
+        v = await self.proposed()
+        await self.p.handle("a", f"confirm {v}")
+        async def interpret(text, context):
+            return {"action": "conversation", "language": "zh", "search": False, "preferences": {"budget": 10}}
+        self.p.interpreter.interpret = interpret
+        result = await self.p.handle("b", "我预算只有10美元")
+        self.assertIn("清空", result.text)
+        self.assertIsNone(self.store.current("a")["selected"])
+
     async def test_complete_and_repeat_is_not_two_people(self):
         v = await self.proposed()
         await self.p.handle("a", f"confirm {v}")
