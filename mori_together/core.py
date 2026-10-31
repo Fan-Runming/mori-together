@@ -26,6 +26,8 @@ def instant(value):
     # Accept "2026-11-03 2pm" / "2026-11-03 2:30 pm" as well as ISO 8601.
     m = re.fullmatch(r"(\d{4}-\d{2}-\d{2})[ T](\d{1,2})(?::(\d{2}))?\s*([ap]m)", text, re.I)
     if m:
+        if not 1 <= int(m[2]) <= 12:
+            raise UserError("For am/pm times, use an hour from 1 to 12, e.g. 2pm.")
         hour = int(m[2]) % 12 + (12 if m[4].lower() == "pm" else 0)
         text = f"{m[1]}T{hour:02d}:{m[3] or '00'}"
     try:
@@ -33,6 +35,8 @@ def instant(value):
     except ValueError:
         raise UserError(f"I couldn't read the time '{value}'. Use a date and time like 2026-11-03 14:00 (Pacific time).") from None
     if dt.tzinfo is None:
+        if dt.replace(tzinfo=PILOT_TZ, fold=0).utcoffset() != dt.replace(tzinfo=PILOT_TZ, fold=1).utcoffset():
+            raise UserError("This local time falls during a daylight-saving clock change. Include an explicit UTC offset.")
         dt = dt.replace(tzinfo=PILOT_TZ)
     return dt.astimezone(timezone.utc)
 

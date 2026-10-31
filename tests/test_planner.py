@@ -199,6 +199,12 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(instant(pref["start"]), expected)
         self.assertEqual(pref["budget"], 25)
 
+    def test_invalid_or_ambiguous_local_times_are_not_silently_changed(self):
+        for value in ("2026-11-03 13pm", "2026-11-03 0am", "2026-11-01 01:30", "2027-03-14 02:30"):
+            with self.assertRaises(ValueError):
+                instant(value)
+        self.assertEqual(instant("2026-11-01T01:30:00-08:00").hour, 9)
+
     async def test_partner_update_does_not_void_preferences_card(self):
         card = (await self.p.handle("a", "status")).card_payload["submit_cta"]["selection"]
         await self.p.handle("b", 'preferences {"budget":20}')
