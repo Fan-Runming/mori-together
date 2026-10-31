@@ -246,6 +246,8 @@ class Planner:
         if len(kinds) > 1:
             raise UserError("You chose different outing types. Agree on an event, restaurant or place to explore first.")
         kind = next(iter(kinds), "event")
+        if kind in {"restaurant", "place"} and end - start > timedelta(hours=6):
+            raise UserError("你们的共同空闲时间范围较长。想在几点出发、几点结束？请各自缩小到具体时段（6 小时以内），我不会把午夜默认当作到访时间。 / Please narrow your availability to a visit window of up to six hours.")
         # Search one common interest if present, otherwise broad search avoids AND-filtering away results.
         interest = prefs[0]["interest"] if prefs[0]["interest"].lower() == prefs[1]["interest"].lower() else ""
         if kind == "restaurant":
@@ -561,11 +563,14 @@ class Planner:
             try:
                 self.constraints(p)
             except ValueError as error:
-                return Reply(("已记下你的信息。还需要你们双方有一致的城市、重合的空闲时间，以及各自的预算和兴趣，才能找到共同合适的活动。" if zh else
+                return Reply(("已记下你的信息。" + str(error) if zh else
                               "I've saved your preferences. " + str(error) + " They can reply in their own words."))
             result = await self.execute(actor, {"action": "search"})
             if zh and result.card_kind:
-                result.text = "找到几个符合你们共同时间、地点和预算的活动，选一个一起看看吧。标价不含未核实的手续费。"
+                if self.constraints(p).get("kind") in {"restaurant", "place"}:
+                    result.text = "找到几个地点候选，选一个一起看看吧。费用和营业时间尚未核实，卡片时间只是共同空闲时段内的建议；并不代表已确认开放或符合预算。"
+                else:
+                    result.text = "找到几个符合你们共同时间、地点和预算的活动，选一个一起看看吧。标价不含未核实的手续费。"
             return result
         if p["selected"]:
             return self.summary(p)

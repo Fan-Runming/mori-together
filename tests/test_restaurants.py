@@ -130,3 +130,21 @@ class RestaurantTests(unittest.IsolatedAsyncioTestCase):
         self.item['businessStatus']='CLOSED_TEMPORARILY'
         event=self.places.normalize(self.item,c['start'],c['end'],'place')
         self.assertFalse(self.planner.eligible(event,c))
+
+
+    async def test_broad_place_window_asks_before_suggesting_midnight(self):
+        for actor in ('a', 'b'):
+            await self.planner.handle(actor, 'preferences '+json.dumps({
+                'kind':'place', 'interest':'parks',
+                'end':(self.now+timedelta(days=2)).isoformat()}))
+        with patch('mori_together.providers.request_json',new_callable=AsyncMock) as req:
+            reply=await self.planner.execute('a',{'action':'conversation','language':'zh','search':True})
+            self.assertIn('几点出发',reply.text)
+            req.assert_not_called()
+
+    async def test_chinese_place_reply_does_not_claim_verified_budget(self):
+        with patch('mori_together.providers.request_json',side_effect=self.request):
+            reply=await self.planner.execute('a',{'action':'conversation','language':'zh','search':True})
+            self.assertEqual(reply.card_kind,'carousel')
+            self.assertIn('费用和营业时间尚未核实',reply.text)
+            self.assertNotIn('符合你们共同时间、地点和预算',reply.text)
