@@ -29,6 +29,22 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         await self.p.handle("a", "select demo-0")
         return self.store.current("a")["version"]
 
+    async def test_direct_mention_commands_and_card_json_skip_llm(self):
+        async def unexpected_llm(*args):
+            raise AssertionError("Direct commands and card JSON must not use the LLM")
+        self.p.interpreter.interpret = unexpected_llm
+        await self.p.handle("a", '@mori-together preferences {"budget":25}')
+        self.assertEqual(self.store.current("a")["members"]["a"]["preferences"]["budget"], 25)
+        p = self.store.current("a")
+        await self.p.handle("a", "@mori-together " + json.dumps({
+            "action": "preferences", "plan_id": p["id"], "version": p["version"],
+            **self.pref}))
+        v = await self.proposed()
+        await self.p.handle("a", f"@mori-together confirm {v}")
+        self.assertEqual(self.store.current("a")["approvals"], ["a"])
+        result = await self.p.handle("b", "@mori-together " + json.dumps({"action":"confirm", "version":v}))
+        self.assertIn("calendar.google.com", result.text)
+
     async def test_complete_and_repeat_is_not_two_people(self):
         v = await self.proposed()
         await self.p.handle("a", f"confirm {v}")

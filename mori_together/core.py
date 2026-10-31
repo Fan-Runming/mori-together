@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import math
+import re
 import secrets
 import sqlite3
 from dataclasses import asdict, dataclass
@@ -99,6 +100,9 @@ class Planner:
 
     async def parse(self, actor, text):
         text = text.strip()
+        # ASI:One may retain the direct recipient mention in TextContent.
+        # Strip only a leading mention, never extract commands from arbitrary prose.
+        text = re.sub(r"^@[A-Za-z0-9_-]+\s+", "", text, count=1).strip()
         if text.startswith("{"):
             obj = json.loads(text)
             if not isinstance(obj, dict):

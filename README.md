@@ -134,8 +134,19 @@ Requests time out and retry at most three times. Logs omit chat text and secrets
 ## Hackathon checklist still to complete
 
 - Create a NEW public GitHub repository (not a fork); review source before pushing.
-- Register and test the agent on Agentverse and ASI:One; record actual address/handle.
-- Complete the core flow in ASI:One, including real tools and distinct participants.
+- Agentverse mailbox registered on 2026-10-31; profile reports Active / ASI Available.
+  Address: `agent1q287kqknwatnyjlenzjclu2xnnkm5t0pfqqe8y5xh85fe2r4dm6wvsucxgg`.
+  Live ASI:One retest passed at 2026-10-31 19:32 UTC after fixing leading-mention
+  parsing (18 automated tests passed). Verified: form submission, preserved state
+  after restart, two separate conversation sessions joining the same plan,
+  Ticketmaster live search returning three events, carousel selection, review-card
+  approvals progressing from 0/2 to 1/2 to 2/2, and a Google Calendar draft link.
+  Test selection: Cardinal Bloom, The Gontiks at Brick and Mortar Music Hall,
+  2026-11-02 04:00 UTC, listed USD 30.14. No booking or calendar write occurred.
+  Source supplied no end time; calendar draft explicitly labels its one-hour
+  duration as a placeholder. Fees and two-ticket inventory remain unverified.
+- Repeat with two actual people: this test used two conversations in one account,
+  not two verified humans. It is not external user feedback or a real reservation.
 - Obtain three assigned Trick or Feedback tries through ASI:One with written notes;
   implement and document at least one change. Do not count this offline demo as use.
 - Provide launch evidence and submission materials; keep service online for judging.
