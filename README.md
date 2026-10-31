@@ -181,3 +181,37 @@ Final approval remains a card click. Natural-language assent alone never records
 approval. Interpreter output is tested with simulated responses; these new phrases
 still need a live language-model walkthrough after agent restart. Unmentioned group
 messages and attached chat history are not established capabilities.
+
+
+### Places and restaurant discovery
+
+Set optional `GOOGLE_PLACES_API_KEY` in local `.env`, enable Places API (New) in a
+Google Cloud project with billing, restrict the key to that API, and restart the
+agent. Configure request quotas in Cloud Console. Without a key, event search
+still works and place requests explain the missing configuration.
+
+Examples: “想找 Berkeley 的火锅”, “想去公园散步”, “想找好看的拍照地点”.
+Mori extracts restaurant/place/event intent and search terms, asks for missing
+shared availability, city and budget, then offers up to three candidates.
+Both people must confirm. Confirmation provides reusable Google Maps and calendar
+links. Visit duration is a proposed one-hour block bounded by shared availability.
+Hours, atmosphere, admission costs, dietary suitability and reservations are NOT
+verified. Unknown cost is not free, including for parks. A zero-budget place search
+can return candidates, clearly marked price unknown. No booking or route is made.
+Ticketmaster remains the source for scheduled events. Yelp is no longer used.
+
+Place cards now request photo metadata and resolve one real cover per displayed
+candidate (up to three). The server sends the key only in the request header and
+passes a key-free Google image URL to the card. Photographer names appear beside
+the photo and author profile links accompany the reply. Missing/failed photos
+fall back to text cards. Photo resource names are not saved; old image URLs may
+expire, so a new search refreshes them. Photo requests may incur additional usage.
+Rating, price and review fields are not requested. Demo fixtures are fictional.
+
+Before public release, review Google Places display, storage and privacy policies:
+https://developers.google.com/maps/documentation/places/web-service/policies .
+The current planner persists candidate payloads in SQLite and chat receipts; its
+storage must be adapted to Google's requirements before deploying Places publicly.
+This integration is for local evaluation until that work and live API validation
+are complete. Multi-stop itineraries and proximity/travel-time ranking are not yet
+implemented.

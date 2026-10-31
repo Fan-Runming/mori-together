@@ -2,8 +2,9 @@
 import asyncio
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote, urlencode
 
 import httpx
 
@@ -43,7 +44,10 @@ class Ticketmaster:
         url = item.get("url", "")
         if not start or urlparse(url).scheme != "https":
             return None
+        images = [x for x in item.get("images", []) if urlparse(x.get("url", "")).scheme == "https"]
+        cover = max(images, key=lambda x: (x.get("ratio") == "16_9", x.get("width", 0)), default={}).get("url")
         return dict(id=item["id"], title=item["name"], start=start,
+                    image=cover,
                     end=item.get("dates", {}).get("end", {}).get("dateTime"),
                     city=venue.get("city", {}).get("name", ""),
                     venue=venue.get("name", "Location not provided"),
@@ -81,11 +85,128 @@ class Ticketmaster:
         return result
 
 
+class GooglePlaces:
+    """Place candidates, never evidence of a reservation or exact admission cost."""
+    mode = "live"
+    fields = "id,displayName,formattedAddress,addressComponents,googleMapsUri,businessStatus,attributions,photos"
+
+    def __init__(self, key=None):
+        self.key = key or os.getenv("GOOGLE_PLACES_API_KEY")
+
+    def headers(self, search=False):
+        if not self.key:
+            raise ProviderError("地点探索尚未启用：请配置 GOOGLE_PLACES_API_KEY，启用 Places API (New) 后重启 agent。演出搜索仍可使用。")
+        fields = self.fields.split(",")
+        return {"X-Goog-Api-Key": self.key,
+                "X-Goog-FieldMask": ",".join("places." + f for f in fields) if search else self.fields}
+
+    def normalize(self, item, start, end, kind):
+        place_id = item.get("id")
+        name = item.get("displayName", {}).get("text")
+        url = item.get("googleMapsUri", "")
+        if not place_id or not name or urlparse(url).scheme != "https":
+            return None
+        components = item.get("addressComponents", [])
+        city = next((c.get("longText", "") for c in components if "locality" in c.get("types", [])), "")
+        # Avoid displaying third-party content whose attribution cannot fit this card.
+        if item.get("attributions"):
+            return None
+        return dict(id="google:" + place_id, kind=kind, title=name, source="Google Maps",
+                    start=start, end=end, city=city, venue=item.get("formattedAddress", name),
+                    price_min=None, price_max=None, price_level="Price unknown",
+                    status="closed" if item.get("businessStatus", "").startswith("CLOSED") else "candidate",
+                    url=url, map_url=url, checked_at=datetime.now(timezone.utc).isoformat(), demo=False,
+                    availability="Suggested visit time only. Opening hours, admission/menu prices and availability not verified.")
+
+    async def add_photo(self, result, item):
+        # Resolve fresh photo resources server-side. Never expose the API key or
+        # persist a photo resource name in plan/card payloads.
+        photos = item.get("photos") or []
+        photo = next((p for p in photos if re.fullmatch(r"places/[^/]+/photos/[^/]+", p.get("name", ""))), None)
+        if not photo:
+            return result
+        try:
+            raw = await request_json("GET", "https://places.googleapis.com/v1/" + photo["name"] + "/media",
+                                     headers={"X-Goog-Api-Key": self.key},
+                                     params={"maxWidthPx": 1000, "skipHttpRedirect": "true"})
+            uri = raw.get("photoUri", "")
+            parsed = urlparse(uri)
+            if parsed.scheme != "https" or not (parsed.hostname or "").endswith(".googleusercontent.com") or self.key in uri:
+                return result
+            credits = []
+            for author in photo.get("authorAttributions", []):
+                name = str(author.get("displayName", "Photographer"))
+                link = str(author.get("uri", ""))
+                if link.startswith("//"):
+                    link = "https:" + link
+                credits.append({"name": name, "url": link if urlparse(link).scheme == "https" else ""})
+            result.update(image=uri, photo_credits=credits)
+        except ProviderError:
+            # An unavailable photo must not hide an otherwise useful place.
+            pass
+        return result
+
+    async def search(self, constraints):
+        headers = self.headers(search=True)
+        start = datetime.fromisoformat(constraints["start"].replace("Z", "+00:00"))
+        end = min(start + timedelta(hours=1), datetime.fromisoformat(constraints["end"].replace("Z", "+00:00")))
+        found = {}
+        kind = constraints.get("kind", "place")
+        term = constraints.get("interest") or ("restaurants" if kind == "restaurant" else "parks museums attractions")
+        for city in constraints.get("cities", [constraints["city"]]):
+            body = {"textQuery": term + " in " + city + ", California, USA", "pageSize": 10, "languageCode": "en"}
+            if kind == "restaurant":
+                body.update(includedType="restaurant", strictTypeFiltering=True)
+            raw = await request_json("POST", "https://places.googleapis.com/v1/places:searchText",
+                                     headers=headers, json=body)
+            for item in raw.get("places", []):
+                result = self.normalize(item, constraints["start"], end.isoformat(), kind)
+                if result and result["city"].lower() in {c.lower() for c in constraints.get("cities", [constraints["city"]])} and result["status"] == "candidate":
+                    found[result["id"]] = (result, item)
+        # Only resolve photos for the three cards that will actually be shown.
+        return [await self.add_photo(result, item) for result, item in list(found.values())[:3]]
+
+    async def refresh(self, event):
+        if not event["id"].startswith("google:"):
+            raise ProviderError("This place came from an older search provider. Please search again.")
+        raw = await request_json("GET", "https://places.googleapis.com/v1/places/" +
+                                 quote(event["id"].removeprefix("google:"), safe=""), headers=self.headers())
+        result = self.normalize(raw, event["start"], event["end"], event["kind"])
+        if not result:
+            raise ProviderError("This place is no longer available. Please search again.")
+        return await self.add_photo(result, raw)
+
+
+class Discovery:
+    mode = "live"
+
+    def __init__(self, events=None, places=None):
+        self.events = events or Ticketmaster()
+        self.places = places or GooglePlaces()
+
+    async def search(self, constraints):
+        provider = self.places if constraints.get("kind") in {"restaurant", "place"} else self.events
+        return await provider.search(constraints)
+
+    async def refresh(self, event):
+        provider = self.places if event.get("kind") in {"restaurant", "place"} else self.events
+        return await provider.refresh(event)
+
+
 class DemoEvents:
     mode = "demo"
 
     async def search(self, constraints):
         start = datetime.fromisoformat(constraints["start"].replace("Z", "+00:00"))
+        if constraints.get("kind") in {"restaurant", "place"}:
+            end = min(start + timedelta(hours=1), datetime.fromisoformat(constraints["end"].replace("Z", "+00:00")))
+            return [dict(id=f"demo-food-{i}", kind=constraints["kind"], title=f"DEMO — {title}",
+                         start=start.isoformat(), end=end.isoformat(), city=constraints["city"],
+                         venue="Fictional demo restaurant", price_min=None, price_max=None, price_level="$$",
+                         status="candidate", url="https://example.com/demo-only", map_url="https://example.com/demo-only",
+                         checked_at=datetime.now(timezone.utc).isoformat(), demo=True,
+                         availability="Fictional fixture; no real restaurant, hours or reservation.")
+                    for i, title in enumerate(["Shared table", "Little kitchen", "Dinner together"])]
         return [dict(id=f"demo-{i}", title=f"DEMO — {title}",
                      start=(start + timedelta(minutes=30*i)).isoformat(),
                      end=(start + timedelta(minutes=30*i+60)).isoformat(),
@@ -114,11 +235,14 @@ class ASIInterpreter:
             "Use review for '这个可以', '我确认', or 'sounds good': this redisplays a confirmation card "
             "and NEVER records approval. Use edit for '重新计划' without new details; it opens preferences "
             "without deleting anything. For ordinary planning language use conversation. "
-            "Its preferences is an object with only explicitly stated city,start,end,budget,interest. "
+            "Its preferences is an object with only explicitly stated city,start,end,budget,interest,kind. "
+            "kind is restaurant for dining and cuisine; place for cafes, parks, museums, sightseeing, walks, photography spots or general places to hang out; event for scheduled events and concerts. For place requests translate interest into a concise English place search term. Do not infer event merely from the generic word activity. "
+            "For restaurant requests, interest is the cuisine or food keyword in English (火锅 = hot pot, 日料 = Japanese); use restaurants if unspecified. "
+            "Do not infer dietary safety or bookings. If asked for multiple stops, ask which to plan first; never claim to have planned a route. For quiet, scenic or photogenic requests, use these as search terms but never claim these qualities are verified.  "
             "city may be a list when multiple locations work. Normalize SF/san fran/旧金山 to San Francisco "
             "and 伯克利 to Berkeley. 'berkeley/san fran area' means city ['Berkeley','San Francisco'], "
             "NOT an unsupported city. Never drop one of two explicitly acceptable cities. "
-            "search is a boolean: true for asking about things to do, concerts, events or recommendations. "
+            "search is a boolean: true for asking about things to do, concerts, events, restaurants, food, parks, sightseeing, places or recommendations. "
             "language is zh for Chinese, en otherwise. question is a short clarification in the speaker's language "
             "only if their request is ambiguous, otherwise omit it. Never return commands or JSON as question. "
             "A message may BOTH update preferences AND request search. Translate concert/演唱会/音乐会 to "
