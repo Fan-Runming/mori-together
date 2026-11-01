@@ -238,6 +238,8 @@ class Planner:
             return obj
         if re.fullmatch(r"(?i)(?:please\s+)?(?:create|start|make)(?:\s+(?:a|new|shared|an outing))*\s+plan[.!]?", text) or re.fullmatch(r"(?:请|帮我|帮我们)?(?:创建|新建|开始)(?:一个|个)?(?:双人|共享)?计划[！。]?", text):
             return {"action": "new"}
+        if re.fullmatch(r"(?i)(?:please )?(?:start (?:all )?over|start again|restart)(?: to plan another one)?[.!]?", text) or re.fullmatch(r"(?:请|帮我|帮我们)?(?:重新开始|从头开始|重新计划)[！。]?", text):
+            return {"action": "restart"}
         if re.fullmatch(r"MORI-[A-Z2-9]{6}", text, re.I):
             return {"action": "join", "code": text.upper()}
         verb, _, rest = text.partition(" ")
@@ -423,8 +425,7 @@ class Planner:
         if action == "new":
             self.leave_if_confirmed(actor)
             if self.store.current(actor):
-                raise UserError("You're already in a plan. Type status to see it, or leave to exit it first.",
-                                "你已经在一个计划里了。发 status 查看，或先发 leave 离开。")
+                return await self.execute(actor, {**cmd, "action": "restart"})
             p = {"id": secrets.token_hex(12), "invite": invite_code(),
                  "creator": actor, "mode": self.provider.mode, "members": {actor: {"name": str(cmd.get("name", "Friend A"))[:40], "preferences": {}}},
                  "version": 0, "state": "draft", "events": [], "selected": None, "approvals": []}
@@ -462,6 +463,8 @@ class Planner:
             self.store.bind(actor, p)
             return self.preferences_card(p)
         p = self.store.current(actor)
+        if not p and action == "restart":
+            return await self.execute(actor, {**cmd, "action": "new"})
         if not p or actor not in p["members"]:
             return Reply(t("You're not in a plan yet. Start one with new YourName, or join a friend's with join INVITE_CODE YourName.",
                            "你还没有加入计划。发 new 你的名字 新建一个，或用 join 邀请码 你的名字 加入朋友的计划。"))
@@ -474,6 +477,35 @@ class Planner:
             r = await self.execute(actor, {"action": "status"})
             r.text = t("This plan changed since that card, so nothing was recorded. Here's the latest:\n",
                        "这张卡片之后计划有变化，这次点击没有记录。下面是最新情况：\n") + r.text
+            return r
+        if action == "restart":
+            p["members"][actor]["preferences"] = {}
+            self.reset(p)
+            p["search_requested"] = False
+            self.note(p, actor, "started over; their preferences, recommendations and approvals were reset", "重新开始了；自己的偏好、推荐和确认已重置")
+            self.store.save(p)
+            if cmd.get("preferences"):
+                await self.execute(actor, {**cmd["preferences"], "action": "preferences", "defer_search": True})
+                p = self.store.current(actor)
+            r = self.preferences_card(p)
+            r.text = t("Let's start again. I've cleared your preferences and the previous recommendations and approvals. You both remain in this plan; your friend's preferences are kept. No calendar entries or bookings were changed.\n\n",
+                       "我们重新开始。已清空你的偏好、旧推荐和确认；你们仍在同一计划中，朋友的偏好已保留。没有修改日历或预订。\n\n") + r.text
+            return r
+        if action == "match_time":
+            name = str(cmd.get("name") or "").strip().casefold()
+            others = [m for a, m in p["members"].items() if a != actor]
+            matches = [m for m in others if not name or m["name"].strip().casefold() == name]
+            if len(matches) != 1:
+                raise UserError("I couldn't identify that friend in this plan. Ask them to join and save their name and times first.",
+                                "当前计划里无法确定这位朋友，请让对方先加入并保存名字和时间。")
+            friend = matches[0]
+            windows = time_windows(friend["preferences"])
+            if not windows:
+                raise UserError(f"{friend['name']} hasn't saved any times yet. They can choose time slots in their preferences card.",
+                                f"{friend['name']} 还没有保存时间，可以让对方在偏好卡片里选择时段。")
+            r = await self.execute(actor, {"action": "preferences", "windows": windows})
+            r.text = t(f"Your time now matches {friend['name']}'s saved availability; your other preferences are unchanged.\n",
+                       f"你的时间已改为 {friend['name']} 保存的空闲时段，其他偏好保持不变。\n") + r.text
             return r
         if action == "delete":
             if actor != p["creator"]:

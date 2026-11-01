@@ -228,13 +228,14 @@ class ASIInterpreter:
         prompt = (
             "You interpret requests for Mori Together. Return ONLY a JSON object. "
             "Allowed actions: new (name,preferences), join (code,name), conversation (preferences,search,question,language), "
-            "status, calendar, event_link, choose (number), review, edit, help. "
+            "status, calendar, event_link, choose (number), review, edit, restart, match_time (name), help. "
             "Use status for '我们现在计划到哪一步了', 'show the options again', or 'what is the plan'. "
             "Use choose with a 1-based number for an explicit choice from options, e.g. '选第一个'. "
             "Match a named event only when it uniquely identifies an option; otherwise ask which one. "
             "Use review for '这个可以', '我确认', or 'sounds good': this redisplays a confirmation card "
-            "and NEVER records approval. Use edit for '重新计划' without new details; it opens preferences "
-            "without deleting anything. For ordinary planning language use conversation. "
+            "and NEVER records approval. Use restart for explicit starting over, 'start all over to plan another one', '重新开始', or '重新计划'. Use edit to open preferences without clearing them. "
+            "Use match_time when THIS speaker explicitly asks to use their friend's saved availability, e.g. 'previous preference but change the time to Wendy’s time' or '我的时间跟Wendy一样'. Set name to the friend's name as written, omit name if they just say my friend. The application resolves saved times; NEVER ask the user to retype the friend's dates or invent dates for this action. Merely reporting a friend's times is not match_time. "
+            "For ordinary planning language use conversation. "
             "Its preferences is an object with only explicitly stated city,start,end,windows,budget,interest,kind. windows is a list of up to 3 {start,end} objects for distinct available intervals; never combine separated times into one continuous span.  "
             "kind is restaurant for dining and cuisine; place for cafes, parks, museums, sightseeing, walks, photography spots or general places to hang out; event for scheduled events and concerts. For place requests translate interest into a concise English place search term. Do not infer event merely from the generic word activity. "
             "For restaurant requests, interest is the cuisine or food keyword in English (火锅 = hot pot, 日料 = Japanese); use restaurants if unspecified. "
@@ -271,7 +272,7 @@ class ASIInterpreter:
                 content = content.split("\n", 1)[1].rsplit("```", 1)[0]
             result = json.loads(content)
             if not isinstance(result, dict) or result.get("action") not in {
-                "new", "join", "conversation", "status", "calendar", "event_link", "choose", "review", "edit", "help"}:
+                "new", "join", "conversation", "status", "calendar", "event_link", "choose", "review", "edit", "restart", "match_time", "help"}:
                 raise ValueError()
             return result
         except (KeyError, IndexError, ValueError, TypeError):

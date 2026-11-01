@@ -118,3 +118,53 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.planner.same_preference('windows',
             [{'start':'2026-11-02T09:00:00-08:00','end':'2026-11-02T12:00:00-08:00'}],
             [{'start':'2026-11-02T17:00:00Z','end':'2026-11-02T20:00:00Z'}]))
+
+    async def test_restart_preserves_friend_and_membership_invalidates_approval(self):
+        await self.pair()
+        await self.planner.handle('b', json.dumps(self.pref([self.window(2, 9, 12)])))
+        p = self.store.current('a')
+        friend = p['members']['b']
+        p['approvals'] = ['a']
+        p['selected'] = {'id': 'old'}
+        self.store.save(p)
+        reply = await self.planner.handle('a', 'start all over to plan another one')
+        after = self.store.current('a')
+        self.assertEqual(after['id'], p['id'])
+        self.assertEqual(after['members']['b'], friend)
+        self.assertEqual(after['members']['a']['preferences'], {})
+        self.assertEqual(after['approvals'], [])
+        self.assertIsNone(after['selected'])
+        self.assertGreater(after['version'], p['version'])
+        self.assertEqual(reply.card_kind, 'form')
+        self.assertNotIn('Type status', reply.text)
+
+    async def test_new_existing_plan_opens_restart(self):
+        await self.pair()
+        reply = await self.planner.handle('a', 'create a plan')
+        self.assertEqual(reply.card_kind, 'form')
+        self.assertEqual(len(self.store.current('a')['members']), 2)
+
+    async def test_match_friend_time_only_and_search(self):
+        await self.pair()
+        self.provider.search = AsyncMock(return_value=[])
+        await self.planner.handle('a', json.dumps(self.pref([self.window(2, 9, 12)])))
+        await self.planner.handle('b', json.dumps({**self.pref([self.window(3, 9, 12), self.window(4, 15, 18)]), 'name':'Wendy'}))
+        before = self.store.current('a')
+        self.provider.search.reset_mock()
+        self.planner.interpreter.interpret.return_value = {'action':'match_time', 'name':'Wendy'}
+        reply = await self.planner.handle('a', "previous preference but change the time to Wendy's time")
+        after = self.store.current('a')
+        self.assertEqual(after['members']['b'], before['members']['b'])
+        self.assertEqual(after['members']['a']['preferences']['windows'], before['members']['b']['preferences']['windows'])
+        for key in ('city','interest','budget'):
+            self.assertEqual(after['members']['a']['preferences'][key], before['members']['a']['preferences'][key])
+        self.assertEqual(self.provider.search.await_count, 2)
+        self.assertIn('Wendy', reply.text)
+
+    async def test_match_missing_or_unknown_friend_does_not_mutate(self):
+        await self.pair()
+        for name in ('Friend B', 'Unknown'):
+            before = self.store.current('a')
+            self.planner.interpreter.interpret.return_value = {'action':'match_time', 'name':name}
+            await self.planner.handle('a', 'use their time')
+            self.assertEqual(self.store.current('a'), before)
