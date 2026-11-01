@@ -205,3 +205,61 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.planner.interpreter.interpret.return_value = {'action':'agree_city','city':'New York'}
         await self.planner.handle('a', 'we agreed on New York')
         self.assertEqual(self.store.current('a'), before)
+
+    async def test_shared_decisions_across_all_planning_fields(self):
+        await self.pair()
+        self.provider.search = AsyncMock(return_value=[])
+        await self.planner.handle('a', json.dumps(self.pref([self.window(2,9,12)])))
+        await self.planner.handle('b', json.dumps({**self.pref([self.window(2,9,12)]), 'kind':'restaurant','interest':'Japanese'}))
+        # Changing the outing type clears the old event interest, but keeps a cuisine
+        # that is already relevant for the partner.
+        self.planner.interpreter.interpret.return_value = {'action':'agree_preferences','preferences':{'kind':'restaurant'}}
+        await self.planner.handle('a', 'agreed on restaurant')
+        p = self.store.current('a')
+        self.assertEqual(p['members']['a']['preferences']['interest'], 'restaurants')
+        self.assertEqual(p['members']['b']['preferences']['interest'], 'Japanese')
+        self.assertEqual(self.provider.search.call_args.args[0]['kind'], 'restaurant')
+        self.assertEqual(self.provider.search.call_args.args[0]['interest'], 'japanese')
+        for updates in ({'kind':'restaurant','interest':'Chinese'}, {'budget':25},
+                        {'windows':[self.window(3,15,18),self.window(4,15,18)]},
+                        {'city':'San Francisco','kind':'place','interest':'museums','budget':35}):
+            self.provider.search.reset_mock()
+            self.planner.interpreter.interpret.return_value = {'action':'agree_preferences','preferences':updates}
+            reply = await self.planner.handle('a', 'we agreed on these details')
+            p = self.store.current('a')
+            for key in updates:
+                self.assertTrue(self.planner.same_preference(key, p['members']['a']['preferences'][key], updates[key]))
+                self.assertEqual(p['members']['a']['preferences'][key],p['members']['b']['preferences'][key])
+            self.assertTrue(self.provider.search.await_count)
+            self.assertEqual(p['approvals'], [])
+            self.assertNotIn('You chose different', reply.text)
+
+    async def test_shared_update_is_atomic_and_survives_search_failure(self):
+        await self.pair()
+        self.provider.search = AsyncMock(return_value=[])
+        for actor in ('a','b'):
+            await self.planner.handle(actor,json.dumps(self.pref([self.window(2,9,12)])))
+        before = self.store.current('a')
+        self.planner.interpreter.interpret.return_value = {'action':'agree_preferences','preferences':{'city':'San Francisco','budget':-1}}
+        await self.planner.handle('a','we agreed on invalid details')
+        self.assertEqual(self.store.current('a'),before)
+        self.provider.search.side_effect = ProviderError('offline')
+        self.planner.interpreter.interpret.return_value = {'action':'agree_preferences','preferences':{'budget':20}}
+        reply = await self.planner.handle('a','we agreed 20 per person')
+        for member in self.store.current('a')['members'].values():
+            self.assertEqual(member['preferences']['budget'],20)
+        self.assertIn('temporarily unavailable',reply.text)
+
+    async def test_shared_change_cannot_modify_partners_other_plan(self):
+        await self.pair()
+        old = self.store.current('a')
+        await self.planner.handle('c','create a plan')
+        other = self.store.current('c')
+        other['members']['b'] = {'name':'Wendy','preferences':{'budget':99}}
+        self.store.save(other)
+        self.store.bind('b',other)
+        self.store.db.commit()
+        self.planner.interpreter.interpret.return_value = {'action':'agree_preferences','preferences':{'budget':20}}
+        await self.planner.handle('a','we agreed 20')
+        self.assertEqual(self.store.current('b')['members']['b']['preferences']['budget'],99)
+        self.assertEqual(self.store.current('a'),old)

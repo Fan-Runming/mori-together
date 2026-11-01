@@ -374,7 +374,7 @@ class Planner:
         start, end = sorted(overlaps)[0]
         kinds = {x["kind"] for x in prefs if x.get("kind")}
         if len(kinds) > 1:
-            raise UserError("You chose different outing types. Agree on an event, restaurant or place to explore first.")
+            raise UserError("You chose different outing types. Tell me which outing type you both agreed on, and I will update it and search.")
         kind = next(iter(kinds), "event")
         if kind in {"restaurant", "place"} and any(b - a > timedelta(hours=6) for a, b in overlaps):
             raise UserError("你们的共同空闲时间范围较长。想在几点出发、几点结束？请各自缩小到具体时段（6 小时以内），我不会把午夜默认当作到访时间。 / Please narrow your availability to a visit window of up to six hours.")
@@ -384,7 +384,7 @@ class Planner:
             food_interests = {x["interest"].lower() for x in prefs
                               if x.get("kind") == "restaurant" and x["interest"].lower() not in {"any", "restaurants", "restaurant", "food"}}
             if len(food_interests) > 1:
-                raise UserError("You suggested different cuisines. Agree on one cuisine, or say restaurants / any for a broad search.")
+                raise UserError("You suggested different cuisines. Tell me which cuisine you both agreed on, or say we are open to any cuisine for a broad search.")
             interest = next(iter(food_interests), "restaurants")
         if kind == "place":
             terms = list(dict.fromkeys(x["interest"] for x in prefs if x.get("kind") == "place" and x["interest"].lower() != "any"))
@@ -491,23 +491,40 @@ class Planner:
             r.text = t("Let's start again. I've cleared your preferences and the previous recommendations and approvals. You both remain in this plan; your friend's preferences are kept. No calendar entries or bookings were changed.\n\n",
                        "我们重新开始。已清空你的偏好、旧推荐和确认；你们仍在同一计划中，朋友的偏好已保留。没有修改日历或预订。\n\n") + r.text
             return r
-        if action == "agree_city":
-            agreed = cities(cmd.get("city", ""))
-            if len(agreed) != 1:
-                raise UserError("Which one city did you agree on?", "你们商量好的是哪一个城市？")
-            city = agreed[0]
-            changed = any(not self.same_preference("city", city, m["preferences"].get("city")) for m in p["members"].values())
+        if action in {"agree_city", "agree_preferences"}:
+            updates = {"city": cmd.get("city", "")} if action == "agree_city" else cmd.get("preferences", {})
+            if not isinstance(updates, dict):
+                raise UserError("What did you both agree on?", "你们商量好的具体内容是什么？")
+            updates = {k: v for k, v in updates.items() if k in REQUIRED | {"kind", "windows"}}
+            if not updates:
+                if cmd.get("pick_times"):
+                    return self.preferences_card(p)
+                raise UserError("Tell me the city, outing type, cuisine, budget or times you both agreed on.",
+                                "告诉我你们商量好的城市、活动类型、菜系、预算或时间即可。")
+            for member_actor in p["members"]:
+                active = self.store.current(member_actor)
+                if not active or active["id"] != p["id"]:
+                    raise UserError("Your friend has moved to another plan. Start a new plan together before changing shared preferences.",
+                                    "朋友已离开或开始另一个计划，请重新一起加入计划后再修改共同偏好。")
+            log_length = len(p.get("log", []))
+            changed = False
+            for member_actor in list(p["members"]):
+                mine = p["members"][member_actor]["preferences"]
+                delta = {k: v for k, v in updates.items() if not self.same_preference(k, v, mine.get(k))}
+                if delta:
+                    await self.execute(member_actor, {**delta, "action": "preferences", "defer_search": True})
+                    p = self.store.current(actor)
+                    changed = True
+            # Attribute a reported joint decision to its speaker, not to the partner.
+            p["log"] = p.get("log", [])[:log_length]
             if changed:
-                for member in p["members"].values():
-                    member["preferences"]["city"] = city
-                self.reset(p)
-                self.note(p, actor, f"reported a shared decision to go to {city}; updated both city preferences and reset any proposal and approvals",
-                          f"表示双方已商量好去 {city}；已更新双方城市，旧方案和确认已重置")
+                self.note(p, actor, "reported a shared decision; updated both preferences for " + ", ".join(updates) + "; previous recommendations and approvals were reset",
+                          "表示双方已商量好；已同步更新 " + "、".join(updates) + "，旧推荐和确认已重置")
             p["search_requested"] = True
             self.store.save(p)
-            r = await self.conversation_reply(p, actor, {}, self.lang == "zh")
-            r.text = t(f"I've set both city preferences to {city}, based on your shared decision. Your other preferences are unchanged. Both of you will still confirm the final activity separately.\n\n",
-                       f"根据你说的共同决定，已将双方城市改为 {city}，其他偏好保持不变。最终活动仍需两人分别确认。\n\n") + r.text
+            r = self.preferences_card(p) if cmd.get("pick_times") else await self.conversation_reply(p, actor, {}, self.lang == "zh")
+            r.text = t("I've updated both preferences based on your shared decision. Final activity confirmation still belongs to each of you.\n\n",
+                       "已根据你说的共同决定更新双方偏好。最终活动仍需两人分别确认。\n\n") + self.details(p) + "\n\n" + r.text
             return r
         if action == "match_time":
             name = str(cmd.get("name") or "").strip().casefold()
@@ -560,6 +577,9 @@ class Planner:
                 self.store.save(p)
                 return Reply(t(f"Thanks, {name}.", f"好的，{name}。") if name else t("Nothing to save. Fill in the card, or type help.", "没有要保存的内容。请填写卡片，或发 help。"))
             pref = dict(p["members"][actor]["preferences"])
+            if "kind" in cmd and cmd["kind"] != pref.get("kind", "event") and "interest" not in cmd:
+                # Interests from a different domain must not become cuisine/place filters.
+                pref["interest"] = {"restaurant": "restaurants", "place": "places", "event": "any"}.get(cmd["kind"], "any")
             for key in ("city", "start", "end", "budget", "interest", "kind", "windows"):
                 if key in cmd:
                     pref[key] = cmd[key]
