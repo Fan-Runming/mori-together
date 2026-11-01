@@ -263,3 +263,39 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         await self.planner.handle('a','we agreed 20')
         self.assertEqual(self.store.current('b')['members']['b']['preferences']['budget'],99)
         self.assertEqual(self.store.current('a'),old)
+
+    async def test_legacy_food_preferences_route_to_restaurants(self):
+        await self.pair()
+        p=self.store.current('a')
+        for m in p['members'].values():
+            m['preferences']={k:v for k,v in self.pref([self.window(2,9,12)]).items() if k!='action'}
+            m['preferences'].update(kind='event',interest='Chinese food')
+        self.store.save(p)
+        self.provider.search=AsyncMock(return_value=[])
+        self.planner.interpreter.interpret.return_value={'action':'conversation','preferences':{'budget':50},'question':'Your budget is now $50. What new times work for you?'}
+        reply=await self.planner.handle('a','i can adapt my time no worries, budge add to 50')
+        p=self.store.current('a')
+        self.assertEqual(p['members']['a']['preferences']['budget'],50)
+        self.assertEqual(p['members']['b']['preferences']['budget'],40)
+        self.assertEqual(self.planner.constraints(p)['kind'],'restaurant')
+        self.assertIn('$50',reply.text)
+        self.provider.search.assert_not_awaited()
+        await self.planner.handle('a','search')
+        self.assertEqual(self.provider.search.call_args.args[0]['kind'],'restaurant')
+
+    async def test_interpreter_retries_invalid_multi_action_response(self):
+        from unittest.mock import patch
+        from mori_together.providers import ASIInterpreter
+        def response(value):
+            return {'choices':[{'message':{'content':json.dumps(value)}}]}
+        valid={'action':'conversation','preferences':{'budget':50},'question':'Which times?'}
+        with patch.dict('os.environ',{'ASI_ONE_API_KEY':'test'}), patch('mori_together.providers.request_json',new_callable=AsyncMock) as request:
+            request.side_effect=[response([{'action':'edit'}]), response(valid)]
+            result=await ASIInterpreter().interpret('budge add to 50, time flexible',{})
+            self.assertEqual(result,valid)
+            self.assertEqual(request.await_count,2)
+            request.side_effect=[response({'action':'unknown'}),response({'action':'unknown'})]
+            result=await ASIInterpreter().interpret('change things',{})
+            self.assertEqual(result['action'],'conversation')
+            self.assertNotIn('preferences',result)
+            self.assertNotIn('type help',result['question'])

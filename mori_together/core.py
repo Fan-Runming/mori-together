@@ -43,6 +43,15 @@ def cities(value):
     return sorted(result)
 
 
+def preference_kind(pref):
+    # Exact food-only labels repair older forms that defaulted dining to events.
+    interest = str(pref.get("interest", "")).strip().lower()
+    food = r"(?:(?:chinese|japanese|italian|mexican|indian|thai|korean|vietnamese)(?: food| cuisine)?|restaurants?|hot pot|dim sum|sushi|中餐|火锅|日料|餐厅)"
+    if re.fullmatch(food, interest):
+        return "restaurant"
+    return pref.get("kind", "event")
+
+
 def instant(value):
     text = str(value).strip().replace("Z", "+00:00")
     # Accept "2026-11-03 2pm" / "2026-11-03 2:30 pm" as well as ISO 8601.
@@ -356,7 +365,7 @@ class Planner:
             if not complete(m["preferences"]):
                 raise UserError(f"{m['name']} still needs to enter their city, availability, budget and interest.",
                                 f"{m['name']} 还需要填写城市、空闲时间、预算和兴趣。")
-        prefs = [m["preferences"] for m in people]
+        prefs = [{**m["preferences"], "kind": preference_kind(m["preferences"])} for m in people]
         shared_cities = sorted(set(cities(prefs[0]["city"])) & set(cities(prefs[1]["city"])))
         if not shared_cities:
             raise UserError("You chose different cities. Tell me which city you both agreed on, and I will update it and continue searching.",
@@ -599,6 +608,8 @@ class Planner:
                 pref["start"], pref["end"] = pref["windows"][0]["start"], pref["windows"][0]["end"]
             elif "start" in cmd or "end" in cmd:
                 pref.pop("windows", None)
+            if pref.get("kind", "event") in {"event", "restaurant", "place"} and preference_kind(pref) != pref.get("kind", "event"):
+                pref["kind"] = preference_kind(pref)
             if pref.get("kind", "event") not in {"event", "restaurant", "place"}:
                 raise UserError("Choose events, restaurants or places.")
             if "city" in pref:
