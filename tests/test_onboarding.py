@@ -168,3 +168,40 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
             self.planner.interpreter.interpret.return_value = {'action':'match_time', 'name':name}
             await self.planner.handle('a', 'use their time')
             self.assertEqual(self.store.current('a'), before)
+
+    async def test_shared_city_decision_updates_both_and_searches(self):
+        await self.pair()
+        self.provider.search = AsyncMock(return_value=[])
+        await self.planner.handle('a', json.dumps(self.pref([self.window(2,9,12)])))
+        await self.planner.handle('b', json.dumps({**self.pref([self.window(2,9,12)]), 'city':'San Francisco'}))
+        before = self.store.current('a')
+        before['selected'] = {'id':'old', 'title':'Previous proposal'}
+        before['approvals'] = ['b']
+        self.store.save(before)
+        self.provider.search.reset_mock()
+        self.planner.interpreter.interpret.return_value = {'action':'agree_city', 'city':'San fran'}
+        reply = await self.planner.handle('a', 'we agreed on San fran')
+        after = self.store.current('a')
+        for actor in ('a','b'):
+            self.assertEqual(after['members'][actor]['preferences'], {**before['members'][actor]['preferences'], 'city':'San Francisco'})
+        self.assertEqual(after['approvals'], [])
+        self.assertIsNone(after['selected'])
+        self.provider.search.assert_awaited_once()
+        self.assertEqual(self.provider.search.call_args.args[0]['city'], 'San Francisco')
+        self.assertNotIn('You chose different cities', reply.text)
+        self.assertIn('shared decision', reply.text)
+
+    async def test_personal_city_change_does_not_update_friend(self):
+        await self.pair()
+        await self.planner.handle('b', json.dumps(self.pref([self.window(2,9,12)])))
+        before = self.store.current('a')['members']['b']['preferences']
+        self.planner.interpreter.interpret.return_value = {'action':'conversation','preferences':{'city':'San Francisco'}}
+        await self.planner.handle('a', 'I prefer SF')
+        self.assertEqual(self.store.current('a')['members']['b']['preferences'], before)
+
+    async def test_invalid_shared_city_does_not_mutate(self):
+        await self.pair()
+        before = self.store.current('a')
+        self.planner.interpreter.interpret.return_value = {'action':'agree_city','city':'New York'}
+        await self.planner.handle('a', 'we agreed on New York')
+        self.assertEqual(self.store.current('a'), before)

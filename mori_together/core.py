@@ -359,8 +359,8 @@ class Planner:
         prefs = [m["preferences"] for m in people]
         shared_cities = sorted(set(cities(prefs[0]["city"])) & set(cities(prefs[1]["city"])))
         if not shared_cities:
-            raise UserError("You chose different cities. Agree on Berkeley or San Francisco, then update your preferences.",
-                            "你们选的城市不一样。先商量好伯克利还是旧金山，再更新偏好。")
+            raise UserError("You chose different cities. Tell me which city you both agreed on, and I will update it and continue searching.",
+                            "你们选的城市不一样。告诉我你们商量好去哪个城市，我会更新并继续搜索。")
         overlaps = set()
         for a in time_windows(prefs[0]):
             for b in time_windows(prefs[1]):
@@ -490,6 +490,24 @@ class Planner:
             r = self.preferences_card(p)
             r.text = t("Let's start again. I've cleared your preferences and the previous recommendations and approvals. You both remain in this plan; your friend's preferences are kept. No calendar entries or bookings were changed.\n\n",
                        "我们重新开始。已清空你的偏好、旧推荐和确认；你们仍在同一计划中，朋友的偏好已保留。没有修改日历或预订。\n\n") + r.text
+            return r
+        if action == "agree_city":
+            agreed = cities(cmd.get("city", ""))
+            if len(agreed) != 1:
+                raise UserError("Which one city did you agree on?", "你们商量好的是哪一个城市？")
+            city = agreed[0]
+            changed = any(not self.same_preference("city", city, m["preferences"].get("city")) for m in p["members"].values())
+            if changed:
+                for member in p["members"].values():
+                    member["preferences"]["city"] = city
+                self.reset(p)
+                self.note(p, actor, f"reported a shared decision to go to {city}; updated both city preferences and reset any proposal and approvals",
+                          f"表示双方已商量好去 {city}；已更新双方城市，旧方案和确认已重置")
+            p["search_requested"] = True
+            self.store.save(p)
+            r = await self.conversation_reply(p, actor, {}, self.lang == "zh")
+            r.text = t(f"I've set both city preferences to {city}, based on your shared decision. Your other preferences are unchanged. Both of you will still confirm the final activity separately.\n\n",
+                       f"根据你说的共同决定，已将双方城市改为 {city}，其他偏好保持不变。最终活动仍需两人分别确认。\n\n") + r.text
             return r
         if action == "match_time":
             name = str(cmd.get("name") or "").strip().casefold()
