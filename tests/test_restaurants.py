@@ -8,6 +8,9 @@ from mori_together.providers import Discovery, DemoEvents, GooglePlaces, Provide
 
 class RestaurantTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        offline = patch('mori_together.providers.request_json', new_callable=AsyncMock, side_effect=ProviderError('Offline test provider'))
+        offline.start()
+        self.addCleanup(offline.stop)
         self.now = datetime.now(timezone.utc)
         self.store = Store(':memory:')
         self.places = GooglePlaces(key='test-only')

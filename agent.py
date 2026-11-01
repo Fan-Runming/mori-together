@@ -43,7 +43,7 @@ def build_agent():
                   seed=seed, port=int(os.getenv("AGENT_PORT", "8001")), mailbox=True,
                   publish_agent_details=True, store_message_history=False,
                   readme_path=str(Path(__file__).with_name("AGENT_PROFILE.md")),
-                  description="Coordinate two friends' preferences, discover activities and confirm a shared plan. No bookings.")
+                  description="Help two friends find activities, restaurants and places in Berkeley or SF, agree on a plan, and head out together. English/中文. No bookings.")
     protocol = Protocol(spec=chat_protocol_spec)
 
     @protocol.on_message(ChatMessage)

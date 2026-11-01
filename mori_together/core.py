@@ -93,6 +93,15 @@ def money(amount):
     return f"${amount:.2f}"
 
 
+def time_windows(pref):
+    return pref.get("windows") or ([{"start": pref["start"], "end": pref["end"]}]
+                                   if "start" in pref and "end" in pref else [])
+
+
+def complete(pref):
+    return {"city", "budget", "interest"}.issubset(pref) and bool(time_windows(pref))
+
+
 INVITE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
 
@@ -221,12 +230,16 @@ class Planner:
         text = text.strip()
         # ASI:One may retain the direct recipient mention in TextContent.
         # Strip only a leading mention, never extract commands from arbitrary prose.
-        text = re.sub(r"^@[A-Za-z0-9_-]+\s+", "", text, count=1).strip()
+        text = re.sub(r"^@(?:Mori Together|[A-Za-z0-9_-]+)\s+", "", text, count=1).strip()
         if text.startswith("{"):
             obj = json.loads(text)
             if not isinstance(obj, dict):
                 raise UserError("Expected a command object.", "需要一个命令对象。")
             return obj
+        if re.fullmatch(r"(?i)(?:please\s+)?(?:create|start|make)(?:\s+(?:a|new|shared|an outing))*\s+plan[.!]?", text) or re.fullmatch(r"(?:请|帮我|帮我们)?(?:创建|新建|开始)(?:一个|个)?(?:双人|共享)?计划[！。]?", text):
+            return {"action": "new"}
+        if re.fullmatch(r"MORI-[A-Z2-9]{6}", text, re.I):
+            return {"action": "join", "code": text.upper()}
         verb, _, rest = text.partition(" ")
         verb = verb.lower()
         if verb in COMMANDS and not rest:
@@ -260,6 +273,24 @@ class Planner:
         command = await self.interpreter.interpret(text, context)
         if command.get("language") in {"en", "zh"} and not CJK.search(text):
             self.lang = command["language"]
+        # Model-generated dates can be stale (e.g. Saturday midnight for "this weekend").
+        # Keep the other facts and ask for selectable times instead of losing onboarding.
+        prefs = command.get("preferences")
+        if isinstance(prefs, dict) and ("windows" in prefs or "start" in prefs or "end" in prefs):
+            try:
+                timing = {**context["my_preferences"], **prefs}
+                if "windows" not in prefs and ("start" in prefs or "end" in prefs):
+                    timing.pop("windows", None)
+                windows = time_windows(timing)
+                invalid = not windows or not 1 <= len(windows) <= 3 or any(
+                    not self.now() < instant(w["start"]) < instant(w["end"]) <= self.now() + timedelta(days=7)
+                    for w in windows)
+            except (ValueError, TypeError, KeyError):
+                invalid = True
+            if invalid:
+                command["preferences"] = {k: v for k, v in prefs.items() if k not in {"start", "end", "windows"}}
+                command["pick_times"] = True
+                command.pop("question", None)
         if command.get("action") == "review":
             # Natural-language assent opens the exact proposal; the card records approval.
             return {"action": "confirm"}
@@ -279,18 +310,35 @@ class Planner:
         p["events"] = []
         p["state"] = "draft"
 
+    def slot_options(self):
+        options = []
+        today = self.now().astimezone(PILOT_TZ).date()
+        for offset in range(8):
+            day = today + timedelta(days=offset)
+            for begin, finish in ((9, 12), (12, 15), (15, 18), (18, 22)):
+                a = datetime(day.year, day.month, day.day, begin, tzinfo=PILOT_TZ)
+                b = a.replace(hour=finish)
+                if self.now() < a and b <= self.now() + timedelta(days=7):
+                    options.append({"value": utc(a) + "|" + utc(b),
+                                    "label": local_range(utc(a), utc(b), self.lang)})
+        return options
+
     def preferences_card(self, p):
         t = self.t
-        return Reply(t("Enter YOUR availability and preferences; these are shared with your planning partner. Times are Pacific unless you add an offset.",
-                       "填一下你自己的空闲时间和偏好，对方能看到这些信息。时间默认按太平洋时间。"), "form", {
+        return Reply(t("Choose up to three available times below, or tell me custom times in your own words. Preferences are shared with your partner. I will search automatically when both of you are ready.",
+                       "点选最多三个空闲时段，也可以直接说你自己的具体时间。偏好对方可见；双方信息齐全后，我会自动搜索。"), "form", {
             "title": t("Make room for a little together-time", "一起留点时间吧"),
             "fields": [
                 {"name": "kind", "kind": "select", "label": "What would you like to explore?", "required": False, "options": [{"value": "event", "label": "Activities"}, {"value": "restaurant", "label": "Restaurants"}, {"value": "place", "label": "Places to explore"}]},
                 {"name": "name", "kind": "text", "label": t("Your name (shown to your friend)", "你的名字（对方会看到）"), "required": False},
                 {"name": "city", "kind": "select", "label": t("City", "城市"), "required": True,
                  "options": [{"value": s, "label": s} for s in ["Berkeley", "San Francisco", "Berkeley / San Francisco"]]},
-                {"name": "start", "kind": "text", "label": t("Available from (e.g. 2026-11-03 14:00, Pacific time)", "最早什么时候有空（例如 2026-11-03 14:00）"), "required": True},
-                {"name": "end", "kind": "text", "label": t("Available until (e.g. 2026-11-03 18:00, Pacific time)", "最晚到什么时候（例如 2026-11-03 18:00）"), "required": True},
+                *[{"name": f"slot_{i}", "kind": "select",
+                   "label": t(f"Available time {i}" + (" (optional)" if i > 1 else ""),
+                              f"空闲时段 {i}" + ("（可选）" if i > 1 else "")),
+                   "required": i == 1,
+                   "options": ([{"value": "none", "label": t("No additional time", "不添加时段")}] if i > 1 else []) + self.slot_options()}
+                  for i in range(1, 4)],
                 {"name": "budget", "kind": "number", "label": t("Maximum USD per person", "每人预算上限（美元）"), "required": True},
                 {"name": "interest", "kind": "text", "label": t("An activity or interest", "想做什么 / 兴趣"), "required": True}],
             # No version: preferences are per person, so a partner's update must not void this card.
@@ -303,7 +351,7 @@ class Planner:
                             "请先邀请另一个人加入，把邀请码私下发给对方。")
         people = list(p["members"].values())
         for m in people:
-            if not REQUIRED.issubset(m["preferences"]):
+            if not complete(m["preferences"]):
                 raise UserError(f"{m['name']} still needs to enter their city, availability, budget and interest.",
                                 f"{m['name']} 还需要填写城市、空闲时间、预算和兴趣。")
         prefs = [m["preferences"] for m in people]
@@ -311,15 +359,22 @@ class Planner:
         if not shared_cities:
             raise UserError("You chose different cities. Agree on Berkeley or San Francisco, then update your preferences.",
                             "你们选的城市不一样。先商量好伯克利还是旧金山，再更新偏好。")
-        start = max(instant(x["start"]) for x in prefs)
-        end = min(instant(x["end"]) for x in prefs)
-        if start <= self.now() or start >= end:
-            raise UserError("No future overlapping time. Update your availability.", "你们接下来没有重合的空闲时间，请更新一下时间。")
+        overlaps = set()
+        for a in time_windows(prefs[0]):
+            for b in time_windows(prefs[1]):
+                start = max(instant(a["start"]), instant(b["start"]))
+                end = min(instant(a["end"]), instant(b["end"]))
+                if self.now() < start < end:
+                    overlaps.add((start, end))
+        if not overlaps:
+            raise UserError("No future overlapping time. Choose another time slot.", "你们没有重合的未来时段，请另选时间。")
+        windows = [{"start": utc(a), "end": utc(b)} for a, b in sorted(overlaps)]
+        start, end = sorted(overlaps)[0]
         kinds = {x["kind"] for x in prefs if x.get("kind")}
         if len(kinds) > 1:
             raise UserError("You chose different outing types. Agree on an event, restaurant or place to explore first.")
         kind = next(iter(kinds), "event")
-        if kind in {"restaurant", "place"} and end - start > timedelta(hours=6):
+        if kind in {"restaurant", "place"} and any(b - a > timedelta(hours=6) for a, b in overlaps):
             raise UserError("你们的共同空闲时间范围较长。想在几点出发、几点结束？请各自缩小到具体时段（6 小时以内），我不会把午夜默认当作到访时间。 / Please narrow your availability to a visit window of up to six hours.")
         # Search one common interest if present, otherwise broad search avoids AND-filtering away results.
         interest = prefs[0]["interest"] if prefs[0]["interest"].lower() == prefs[1]["interest"].lower() else ""
@@ -335,9 +390,11 @@ class Planner:
         if interest.lower() == "any":
             interest = ""
         return dict(city=shared_cities[0], cities=shared_cities, start=utc(start), end=utc(end),
-                    budget=min(x["budget"] for x in prefs), interest=interest, kind=kind)
+                    budget=min(x["budget"] for x in prefs), interest=interest, kind=kind, windows=windows)
 
     def eligible(self, event, c):
+        if c.get("windows"):
+            return any(self.eligible(event, {**c, **w, "windows": []}) for w in c["windows"])
         if event.get("kind") in {"restaurant", "place"}:
             return (c.get("kind") in {"restaurant", "place"} and event["status"] == "candidate"
                     and (c["budget"] > 0 or c.get("kind") == "place")
@@ -378,6 +435,12 @@ class Planner:
                        f"followed by their name:\njoin {p['invite']}\n(for example: join {p['invite']} Sam). The code works once.\n\n",
                        f"计划已创建（{self.provider.mode.upper()}）。让朋友给 Mori 发这条消息，后面加上自己的名字：\njoin {p['invite']}\n"
                        f"（例如：join {p['invite']} 小明）。邀请码只能用一次。\n\n") + r.text
+            if cmd.get("preferences"):
+                await self.execute(actor, {**cmd["preferences"], "action": "preferences", "defer_search": True})
+                saved = self.store.current(actor)
+                saved["search_requested"] = True
+                self.store.save(saved)
+                r.text += "\n" + self.details(saved)
             return r
         if action == "join":
             self.leave_if_confirmed(actor)
@@ -432,16 +495,40 @@ class Planner:
             return Reply(t("Your preferences and cached replies for this plan were cleared. The proposal and approvals were reset.",
                            "你的偏好和相关记录已清除，方案和确认也已重置。"))
         if action == "preferences":
+            if any(f"slot_{i}" in cmd for i in range(1, 4)):
+                windows = []
+                for i in range(1, 4):
+                    value = cmd.get(f"slot_{i}")
+                    if value and value != "none":
+                        a, b = str(value).split("|")
+                        windows.append({"start": a, "end": b})
+                cmd = {**cmd, "windows": windows}
             name = str(cmd.get("name") or "").strip()[:40]
             if name:
                 p["members"][actor]["name"] = name
-            if not any(key in cmd for key in ("city", "start", "end", "budget", "interest", "kind")):
+            if not any(key in cmd for key in ("city", "start", "end", "budget", "interest", "kind", "windows")):
                 self.store.save(p)
                 return Reply(t(f"Thanks, {name}.", f"好的，{name}。") if name else t("Nothing to save. Fill in the card, or type help.", "没有要保存的内容。请填写卡片，或发 help。"))
             pref = dict(p["members"][actor]["preferences"])
-            for key in ("city", "start", "end", "budget", "interest", "kind"):
+            for key in ("city", "start", "end", "budget", "interest", "kind", "windows"):
                 if key in cmd:
                     pref[key] = cmd[key]
+            if "windows" in cmd:
+                raw = cmd["windows"]
+                if not isinstance(raw, list) or not 1 <= len(raw) <= 3:
+                    raise UserError("Choose one to three time slots.", "请选择一到三个空闲时段。")
+                windows = []
+                for w in raw:
+                    a, b = instant(w["start"]), instant(w["end"])
+                    if not self.now() < a < b <= self.now() + timedelta(days=7):
+                        raise UserError("Choose future time slots within seven days, with end after start.", "请选择未来七天内的时段，结束须晚于开始。")
+                    window = {"start": utc(a), "end": utc(b)}
+                    if window not in windows:
+                        windows.append(window)
+                pref["windows"] = sorted(windows, key=lambda w: w["start"])
+                pref["start"], pref["end"] = pref["windows"][0]["start"], pref["windows"][0]["end"]
+            elif "start" in cmd or "end" in cmd:
+                pref.pop("windows", None)
             if pref.get("kind", "event") not in {"event", "restaurant", "place"}:
                 raise UserError("Choose events, restaurants or places.")
             if "city" in pref:
@@ -478,13 +565,28 @@ class Planner:
                 text += t(" The previous proposal and any approvals were reset.", "之前的方案和已有的确认都已清空。")
             if pref.get("budget") == 0 and pref.get("kind", "event") == "event":
                 text += t(" A $0 budget means only free events will show.", "预算为 $0 时只会显示免费活动。")
+            if not cmd.get("defer_search") and len(p["members"]) == 2 and all(complete(m["preferences"]) for m in p["members"].values()):
+                p["search_requested"] = True
+                self.store.save(p)
+                try:
+                    r = await self.execute(actor, {"action": "search"})
+                    r.text = text + "\n" + r.text
+                    return r
+                except (UserError, ProviderError) as error:
+                    # Saving valid preferences must survive a search failure.
+                    return Reply(text + "\n" + (error.zh if isinstance(error, UserError) and self.lang == "zh" and error.zh else str(error)))
             return Reply(text + " " + self.next_step(p, actor))
         if action == "search":
             c = self.constraints(p)
             # Looking for alternatives keeps a confirmed plan until one of them is actually proposed.
             keep = p["state"] == "confirmed" and p["selected"]
-            events = [e for e in await self.provider.search(c) if self.eligible(e, c)
-                      and not (keep and e["id"] == p["selected"]["id"])]
+            found = {}
+            for w in c["windows"]:
+                single = {**c, **w, "windows": []}
+                for e in await self.provider.search(single):
+                    if self.eligible(e, single) and not (keep and e["id"] == p["selected"]["id"]):
+                        found.setdefault(e["id"], e)
+            events = list(found.values())
             if not events and c.get("kind") in {"restaurant", "place"}:
                 return Reply("No place candidates found in your shared city. Try another type of place or area. Prices and opening hours require checking; restaurant searches need a positive budget.")
             if not events:
@@ -586,8 +688,10 @@ class Planner:
             if p["selected"]:
                 return await self.display_summary(p)
             if p["state"] == "options" and p["events"]:
-                return self.options_card(p)
-            if REQUIRED.issubset(p["members"][actor]["preferences"]):
+                r = self.options_card(p)
+                r.text += "\n" + self.details(p)
+                return r
+            if complete(p["members"][actor]["preferences"]):
                 return Reply(self.details(p) + "\n\n" + self.next_step(p, actor) + t(" Type edit to change yours.", "想修改的话发 edit。"))
             r = self.preferences_card(p)
             r.text = self.details(p) + "\n\n" + r.text
@@ -655,8 +759,10 @@ class Planner:
         zh = self.lang == "zh"
         p = self.store.current(actor)
         if not p:
-            return Reply("可以帮你们找活动或餐厅。先创建一个双人计划，或用朋友的邀请码加入；加入后直接说时间、地点和预算即可。" if zh else
-                         "I can help you find something to do. First create a shared plan or join your friend's invite; then tell me your availability, city and budget in your own words.")
+            if cmd.get("search") is True or cmd.get("preferences"):
+                return await self.execute(actor, {"action": "new", "preferences": cmd.get("preferences", {})})
+            return Reply("说“帮我们安排一次出门”即可开始，或者把朋友的邀请码发给我。" if zh else
+                         "Say ‘create a plan’ to get started, or send your friend's invite code.")
         if p["mode"] != self.provider.mode:
             raise UserError("This plan belongs to another mode. Use a separate database for live and demo runs.")
         prefs = cmd.get("preferences", {})
@@ -664,16 +770,19 @@ class Planner:
             raise UserError("Please describe your availability, city or budget again.", "请再说一下你的时间、城市或预算。")
         mine = p["members"][actor]["preferences"]
         # The model restates unchanged facts in other formats; only a real change may reset the proposal.
-        updates = {k: v for k, v in prefs.items() if k in REQUIRED | {"kind"} and not self.same_preference(k, v, mine.get(k))}
+        updates = {k: v for k, v in prefs.items() if k in REQUIRED | {"kind", "windows"} and not self.same_preference(k, v, mine.get(k))}
         had_proposal = bool(p["selected"])
-        revising_results = bool(p["selected"] or p["events"])
         if updates:
-            await self.execute(actor, {"action": "preferences", **updates})
+            await self.execute(actor, {**updates, "action": "preferences", "defer_search": True})
             p = self.store.current(actor)
-        if cmd.get("search") is True or (updates and revising_results):
+        if cmd.get("search") is True or updates:
             p["search_requested"] = True
         self.store.save(p)
-        reply = await self.conversation_reply(p, actor, cmd, zh)
+        if cmd.get("pick_times"):
+            reply = self.preferences_card(p)
+            reply.text = self.t("Please choose future times below; I kept your other details.\n", "请点选下面的未来时段，其他信息已记下。\n") + reply.text
+        else:
+            reply = await self.conversation_reply(p, actor, cmd, zh)
         if updates and had_proposal:
             reply.text = ("注意：你的偏好有变化，之前的方案和已有的确认都已清空。\n" if zh else
                           "Heads up: your preferences changed, so the current proposal and any approvals were reset.\n") + reply.text
@@ -684,6 +793,9 @@ class Planner:
         if old is None:
             return False
         try:
+            if key == "windows":
+                normalize = lambda values: sorted(set((utc(instant(w["start"])), utc(instant(w["end"]))) for w in values))
+                return normalize(new) == normalize(old)
             if key == "city":
                 return cities(new) == cities(old)
             if key in ("start", "end"):
@@ -691,7 +803,7 @@ class Planner:
                 return instant(new).replace(microsecond=0) == instant(old)
             if key == "budget":
                 return float(re.sub(r"[$,\s]|usd", "", str(new), flags=re.I)) == float(old)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, KeyError):
             return False
         return str(new).strip().lower() == str(old).strip().lower()
 
@@ -703,6 +815,8 @@ class Planner:
                   "end": "结束时间" if zh else "available until", "budget": "每人预算上限" if zh else "budget per person",
                   "interest": "想做什么" if zh else "activity interests"}
         missing = [label for key, label in labels.items() if key not in p["members"][actor]["preferences"]]
+        if missing and not time_windows(p["members"][actor]["preferences"]):
+            return self.preferences_card(p)
         if missing:
             return Reply(("记下了。还需要你的" + "、".join(missing) + "，直接用平常说话的方式告诉我就好。") if zh else
                          "Got it. I still need your " + ", ".join(missing) + ". You can tell me in your own words.")
@@ -712,7 +826,11 @@ class Planner:
             except UserError as error:
                 return Reply(("已记下你的信息。" + (error.zh or str(error)) + "对方可以直接用平常说话的方式回复。") if zh else
                              "I've saved your preferences. " + str(error) + " They can reply in their own words.")
-            return await self.execute(actor, {"action": "search"})
+            try:
+                return await self.execute(actor, {"action": "search"})
+            except ProviderError:
+                return Reply(self.t("Your preferences are saved, but search is temporarily unavailable. Ask me to try again.",
+                                    "偏好已保存，但搜索服务暂时不可用。稍后让我再试一次即可。"))
         if p["selected"]:
             return await self.display_summary(p)
         return Reply("记下你的偏好了。想看推荐时，直接问我附近有什么好玩的就行。" if zh else
@@ -724,7 +842,7 @@ class Planner:
             x = m["preferences"]
             parts = [x["city"]] if "city" in x else []
             if "start" in x and "end" in x:
-                parts.append(local_range(x["start"], x["end"], self.lang))
+                parts.append(" / ".join(local_range(w["start"], w["end"], self.lang) for w in time_windows(x)))
             if "budget" in x:
                 parts.append(self.t(f"up to ${x['budget']:g}", f"每人最多 ${x['budget']:g}"))
             if "interest" in x:
@@ -738,10 +856,10 @@ class Planner:
             if p.get("invite"):
                 return t(f"Waiting for your friend to join with: join {p['invite']}", f"等朋友用这条消息加入：join {p['invite']}")
             return t("Waiting for your friend to join.", "等朋友加入。")
-        waiting = [m["name"] for a, m in p["members"].items() if not REQUIRED.issubset(m["preferences"])]
+        waiting = [m["name"] for a, m in p["members"].items() if not complete(m["preferences"])]
         if waiting:
             return t(f"Waiting for {', '.join(waiting)} to share their preferences.", f"等 {'、'.join(waiting)} 填写偏好。")
-        return t("You're both set. Type search to see options.", "你们都填好了，发 search 看看有什么活动。")
+        return t("Your preferences are ready. I will look for shared options when both of you are ready.", "偏好已就绪，双方信息齐全后我会自动找推荐。")
 
     def explain(self, p, c):
         t, lang = self.t, self.lang
@@ -752,6 +870,8 @@ class Planner:
         if len({x["budget"] for x in prefs}) > 1:
             text += t(" (the lower of your two budgets)", "（取你们两人中较低的预算）")
         text += t(".", "。")
+        if len(c.get("windows", [])) > 1:
+            text += t(" All shared windows: ", "所有共同空闲时段：") + " / ".join(local_range(w["start"], w["end"], lang) for w in c["windows"])
         interests = [x["interest"] for x in prefs]
         if c["interest"]:
             text += t(f" Interest: {c['interest']}.", f"兴趣：{c['interest']}。")

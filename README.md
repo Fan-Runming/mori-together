@@ -18,7 +18,7 @@ The original Mori product is separate and is not required for this workflow.
 - Live walkthrough completed: Agentverse connection, Ticketmaster results, ASI:One
   cards and approvals from two accounts in one shared conversation.
 - Natural-language planning now accumulates the speaker's preferences, asks for
-  missing facts and resumes a requested search when both participants are ready.
+  missing facts and automatically searches when both participants are ready.
   These orchestration paths have mocked-interpreter regression coverage; the new
   interpreter prompt still needs a live ASI:One walkthrough after restart.
 - Ordinary group messages are not proven to reach Mori. ASI:One currently routes
@@ -77,11 +77,11 @@ For deployment, the Dockerfile is included; inject environment secrets and mount
 Use direct agent mentions and separate ASI:One conversations. The safest first
 trial is two different accounts, with one person in each direct conversation.
 
-1. Alice: `new Alice`. Share the single-use invitation privately with Bob.
+1. Alice: “create a plan” (or `new Alice`). Share the single-use invitation privately with Bob.
 2. Bob: `join INVITE_CODE Bob`.
 3. Each enters their own preferences using the form or a command. If the other
    participant changed the plan, type `status` for a fresh card.
-4. Alice: `search`, then select an option.
+4. After both save complete preferences, Mori searches automatically; select an option.
 5. Both: `status`, review the current proposal and click “Works for me”.
 6. Verify the two sessions create two distinct participants. One participant
    confirming repeatedly must never confirm for the other.
@@ -215,3 +215,14 @@ storage must be adapted to Google's requirements before deploying Places publicl
 This integration is for local evaluation until that work and live API validation
 are complete. Multi-stop itineraries and proximity/travel-time ranking are not yet
 implemented.
+
+### Natural onboarding and multiple available times
+
+A concrete first outing request creates a shared plan and retains extracted preferences.
+Explicit short startup phrases work without an LLM call; other phrasing uses ASI:One.
+Users can paste an invite code directly to join. The form offers up to three time-slot
+dropdowns for the next seven days; custom intervals can also be expressed in natural
+language. Stored `windows` are separate intervals; legacy `start`/`end` remains supported.
+Search queries each actual shared intersection and deduplicates results by provider ID.
+Both form and conversational preference completion trigger search automatically.
+Search outages preserve saved preferences for retry. Group messages still require @mentions.
